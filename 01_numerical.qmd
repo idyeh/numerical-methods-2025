@@ -1,0 +1,724 @@
+---
+title: "数值计算"
+---
+
+## 数值计算基础
+
+* 本讲主题：**浮点数 · 舍入与截断误差 · 条件数 vs 稳定性 · 向量化与广播**
+* 课程目标：
+
+  * 能清晰区分问题本身是否敏感（**条件数**）与算法实现是否稳健（**稳定性**）
+  * 掌握**浮点误差来源**与基本估计方法
+  * 在代码层面用**向量化**与**广播**写出更简洁、更高性能的实现
+
+
+
+## 一、浮点模型回顾
+
+* 计算机用**有限位数**近似实数，浮点数在 IEEE 754 有定义：
+
+  $$
+  x \approx \pm(1.\underbrace{b_1b_2\cdots b_{p}}_{\text{有效位 }p}) \times 2^{e}
+  $$
+* 常见格式：
+
+  * `float32`：有效位 $p=24$（含隐藏位），指数更窄，相对精度约 $2^{-24}$
+  * `float64`：有效位 $p=53$，相对精度约 $2^{-53}\approx 1.11\times10^{-16}$（常记作 $\epsilon \approx 2.22\times10^{-16}$）
+* **机器精度（machine epsilon）**：满足 $1+\epsilon > 1$ 的最小浮点数
+
+  * `float64`：$\epsilon = 2^{-52}\approx 2.22\times10^{-16}$
+
+
+
+## 浮点数的分布与间隙
+
+* **均匀吗？** 并不是。靠近 0 的间距更密，数值越大间距越稀疏（以 2 为底的**对数量化**）
+* 两个相邻可表示数的间距（units in the last place）$\mathrm{ulp}(x) \propto |x|$
+
+  * 接近 0：刻度线密集
+  * 远离 0：刻度线变疏
+* 结论：对**大数做小改动**容易“吞掉”，对**小数作差**容易发生“抵消”
+
+
+
+## 舍入与舍入模式
+
+* 常见默认：**四舍五入到最近，碰到中点取偶数**（round to nearest, ties to even）
+* 模式会影响统计偏差与误差累积
+* 一般课程实验使用默认模式即可，但要知道**存在多种舍入模式**，在金融/安全等场景需格外注意
+
+
+
+## 误差的两大来源
+
+* **截断误差（truncation error）**：来自**数学近似**，例如用泰勒展开前几项替代函数、用有限步长近似导数
+* **舍入误差（rounding error）**：来自**有限位浮点表示**与每一步运算的舍入
+* 总误差 ≈ 截断误差 + 舍入误差
+* **权衡**：步长更小 → 截断误差更小，但**舍入误差**可能更显著（经典“最佳步长”讨论）
+
+
+
+## 绝对误差与相对误差
+
+* 真实值 $x$，近似值 $\hat{x}$
+
+  * **绝对误差**：$|\hat{x}-x|$
+  * **相对误差**：$\displaystyle \frac{|\hat{x}-x|}{|x|}$（$x\neq 0$）
+* 实操建议：评估算法时，优先报告**相对误差**；当真值可能接近 0，再补充绝对误差
+
+
+
+## 灾难性抵消
+
+* 当两个数值**非常接近**时，做减法会**丢失有效位数**，这叫做灾难性抵消（catastrophic cancellation）
+* 例：$\sqrt{1+x}-1$，当 $x$ 很小时，$\sqrt{1+x}\approx 1 + \tfrac{x}{2}$
+  直接计算会把前导的“1”抵消掉
+* 这个例子可以用共轭无理式**重写**：
+
+  $$
+  \sqrt{1+x}-1 = \frac{x}{\sqrt{1+x}+1}
+  $$
+
+右式避免了近似相等数的相减，更**稳定**
+
+[演示](01_numerical.qmd#demo1-1)
+
+
+
+## 经典稳定重写：二次方程求根
+
+* 标准公式：$\displaystyle x=\frac{-b\pm\sqrt{b^2-4ac}}{2a}$
+  当 $b^2\gg 4ac$ 且 $b>0$，计算 $-b+\sqrt{\cdot}$ 会发生**抵消**
+* **稳定技巧**：
+
+  $$
+  q=-\tfrac{1}{2}\Bigl(b+\operatorname{sgn}(b)\sqrt{b^2-4ac}\Bigr),\quad
+  x_1 = \frac{q}{a},\quad x_2 = \frac{c}{q}
+  $$
+
+  避免了灾难性抵消，两个根都能稳定计算
+
+
+
+## Kahan 补偿求和
+
+* 朴素求和 $\sum x_i$ 会把小量逐渐“吞掉”
+* **Kahan 算法**：用一个补偿项修正丢失的低位
+* 代码：
+
+```python
+def kahan_sum(x):
+    s = 0.0
+    c = 0.0
+    for v in x:
+        y = v - c
+        t = s + y
+        c = (t - s) - y
+        s = t
+    return s
+```
+
+[演示](01_numerical.qmd#demo1-2)
+
+
+
+## 二、条件数
+
+* 直觉：**输入有一点点变化，输出会不会被放大很多？**
+* 条件数（condition number）衡量了问题对输入数据微小变化的敏感性
+* 标量情形：
+
+  $$
+  \kappa(f,x) \approx \left|\frac{x f'(x)}{f(x)}\right|
+  $$
+
+  表示“相对输入扰动”被放大到“相对输出扰动”的倍数
+* 例：$f(x)=\displaystyle\frac{1}{1-x}$ 在 $x\to1$ 时：$|f'(x)|=\displaystyle\frac{1}{(1-x)^2}$，输出对输入**极其敏感**，属于病态（ill-conditioned）
+
+[演示](01_numerical.qmd#demo1-3)
+
+
+
+## 线性方程组的条件数
+
+* 对 $\mathbf{A}\mathbf{x}=\mathbf{b}$：
+
+  $$
+  \kappa(\mathbf{A}) = \|\mathbf{A}\| \cdot \|\mathbf{A}^{-1}\|
+  $$
+* $\kappa(\mathbf{A})$ 大 → 病态！**小的 $\mathbf{b}$ 扰动或舍入**都可能导致解 $\mathbf{x}$ 的大幅变化
+
+
+
+## 条件数 vs 稳定性
+
+* **条件数**：衡量**数学问题**对输入扰动的敏感程度（**问题层面**）
+* **稳定性**：衡量**具体算法实现**对舍入误差的“免疫力”（**算法层面**）
+
+```{python}
+# | code-fold: true
+import matplotlib.pyplot as plt
+import matplotlib.patches as patches
+
+# 解决中文显示问题
+plt.rcParams["font.sans-serif"] = ["PingFang SC", "Arial Unicode MS"]
+plt.rcParams["axes.unicode_minus"] = False
+
+# 创建图表和子图
+fig, ax = plt.subplots(figsize=(6, 6))
+
+# 隐藏坐标轴
+ax.set_xticks([])
+ax.set_yticks([])
+ax.spines["top"].set_visible(False)
+ax.spines["right"].set_visible(False)
+ax.spines["bottom"].set_visible(False)
+ax.spines["left"].set_visible(False)
+
+# 绘制中心十字线
+ax.axhline(0.5, color="black", linewidth=2, linestyle="-")
+ax.axvline(0.5, color="black", linewidth=2, linestyle="-")
+
+# 添加象限标签
+ax.text(
+    0.75,
+    0.9,
+    "良态问题 (Well-Conditioned)",
+    ha="center",
+    va="center",
+    fontsize=10,
+    fontweight="bold",
+)
+ax.text(
+    0.25,
+    0.9,
+    "病态问题 (Ill-Conditioned)",
+    ha="center",
+    va="center",
+    fontsize=10,
+    fontweight="bold",
+)
+ax.text(
+    0.05,
+    0.75,
+    "稳定算法 (Stable Algorithm)",
+    ha="center",
+    va="center",
+    rotation=90,
+    fontsize=10,
+    fontweight="bold",
+)
+ax.text(
+    0.05,
+    0.25,
+    "不稳定算法 (Unstable Algorithm)",
+    ha="center",
+    va="center",
+    rotation=90,
+    fontsize=10,
+    fontweight="bold",
+)
+
+# 象限1：好问题 + 好算法 -> 理想
+ax.add_patch(patches.Rectangle((0.5, 0.5), 0.5, 0.5, facecolor="green", alpha=0.2))
+ax.text(
+    0.75,
+    0.75,
+    "理想情况\n(Ideal)",
+    ha="center",
+    va="center",
+    fontsize=14,
+    fontweight="bold",
+    color="green",
+)
+ax.text(
+    0.75, 0.65, "结果准确可靠", ha="center", va="center", fontsize=12, color="green"
+)
+
+# 象限2：坏问题 + 好算法 -> 勉强可用
+ax.add_patch(patches.Rectangle((0, 0.5), 0.5, 0.5, facecolor="blue", alpha=0.2))
+ax.text(
+    0.25,
+    0.75,
+    "勉强可用\n(Usable)",
+    ha="center",
+    va="center",
+    fontsize=14,
+    fontweight="bold",
+    color="blue",
+)
+ax.text(
+    0.25,
+    0.65,
+    "误差不可消除，但算法没有放大",
+    ha="center",
+    va="center",
+    fontsize=12,
+    color="blue",
+)
+
+# 象限3：坏问题 + 坏算法 -> 双倍灾难
+ax.add_patch(patches.Rectangle((0, 0), 0.5, 0.5, facecolor="red", alpha=0.2))
+ax.text(
+    0.25,
+    0.25,
+    "双倍灾难\n(Double Disaster)",
+    ha="center",
+    va="center",
+    fontsize=14,
+    fontweight="bold",
+    color="red",
+)
+ax.text(
+    0.25,
+    0.15,
+    "误差被算法进一步放大",
+    ha="center",
+    va="center",
+    fontsize=12,
+    color="red",
+)
+
+# 象限4：好问题 + 坏算法 -> 多余的误差
+ax.add_patch(patches.Rectangle((0.5, 0), 0.5, 0.5, facecolor="yellow", alpha=0.2))
+ax.text(
+    0.75,
+    0.25,
+    "多余的误差\n(Unnecessary Error)",
+    ha="center",
+    va="center",
+    fontsize=14,
+    fontweight="bold",
+    color="orange",
+)
+ax.text(
+    0.75,
+    0.15,
+    "问题本身OK，但算法引入误差",
+    ha="center",
+    va="center",
+    fontsize=12,
+    color="orange",
+)
+
+# 设置标题
+plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+plt.show()
+```
+
+
+
+## 前向误差与后向误差
+
+* **前向误差**（forward error）：$\Delta y = |\hat{y}-y|$ 或它的相对形式
+* **后向误差**（backward error）：把计算结果解释为**精确解**但输入被**轻微扰动**后的结果
+
+  * 数学上，满足 $f(x + \Delta x)=\hat{y}$ 的最小 $\Delta x$
+  * 若算法能保证后向误差很小，称为**后向稳定（backward stable）**
+* 数值线性代数中的许多经典算法（如带主元的高斯消去）追求后向稳定
+
+
+
+## 稳定性与迭代次数
+
+* 稳定不等于快速，但**不稳定往往导致误差放大**
+* 实际工作时，**收敛性 + 误差传播 + 计算成本**需要一并考量
+* 例：解线性方程的迭代法（Jacobi/GS/CG）：
+
+  * 条件数影响收敛快慢
+  * 实现中的向量化与数值稳定性也影响迭代误差的演化
+
+
+
+## 三、向量化
+
+* 让底层库（BLAS/矢量指令）处理循环，我们人类写**数组级别**运算
+* 好处：
+
+  * 代码更短更清晰
+  * 更好地利用缓存与指令并行
+  * 在 JAX 等框架下更容易 **JIT/并行化**
+* 建议**先写出数学表达式**，再直接翻译为数组运算
+
+
+
+## 广播
+
+* 广播（broadcasting）通过概念上“拉伸”较小的数组来在不同**形状**（shape）的数组之间进行操作
+* 规则：
+
+  * 从**尾部维度**往前对齐
+  * 维度相等或其中一方为 1 时可广播（broadcasting）
+
+* 不可广播意味着维度错误
+* 例：形状 `(n,1)` 与 `(1,m)` 相加 → 结果 `(n,m)`（外和）
+
+```python
+import numpy as np
+
+a = np.arange(3).reshape(3,1)   # (3,1)
+b = np.arange(4).reshape(1,4)   # (1,4)
+c = a + b                       # (3,4)
+```
+
+
+
+## 广播注意事项：内存与复杂度
+
+* **有些操作会产生大中间结果**，如外积/外和，可能导致爆内存
+* 解决思路：
+
+  * 使用**专用算子**（如 `np.outer`、`np.einsum`、矩阵乘法 `@`）
+  * **分块（chunk）**处理，避免一次性构造巨大的张量
+  * 在 JAX 中结合 `vmap` 分批处理
+
+
+
+## 向量化示例 1：距离矩阵
+
+* 给定点集 $X\in\mathbb{R}^{n\times d}$，计算欧氏距离矩阵 $D\in\mathbb{R}^{n\times n}$
+
+* **低效版本**：双重 `for` 循环
+
+```{python}
+# | code-fold: true
+import numpy as np
+
+
+def euclidean_distance_loop(X):
+    """
+    使用双重 for 循环计算欧氏距离矩阵。
+
+    Args:
+        X (np.ndarray): 一个形状为 (n, d) 的 NumPy 数组，代表 n 个 d 维点。
+
+    Returns:
+        np.ndarray: 一个形状为 (n, n) 的欧氏距离矩阵。
+    """
+    n, d = X.shape
+    D = np.zeros((n, n))
+    for i in range(n):
+        for j in range(n):
+            D[i, j] = np.linalg.norm(X[i, :] - X[j, :])
+    return D
+
+
+X = np.random.randn(5, 3)
+D_loop = euclidean_distance_loop(X)
+print(D_loop)
+```
+
+## 向量化示例 1：距离矩阵（续）
+
+观察欧式距离公式的展开式
+
+$||x_i - x_j||^2 = ||x_i||^2 + ||x_j||^2 - 2 x_i·x_j$
+
+用 Gram 内积矩阵 $\mathbf{G}=\mathbf{X} \mathbf{X}^\top$，即 $\mathbf{G}_{ij}=x_i\cdot x_j$，可以用 $\mathbf{G}$ 替代其中的点积项，实施**向量化**计算：
+
+```python
+import numpy as np
+
+X = np.random.randn(1000, 3)            # (n, d)
+G = X @ X.T                             # Gram 矩阵
+n2 = np.sum(X*X, axis=1, keepdims=True) # (n,1)
+D2 = n2 + n2.T - 2*G                    # (n,n)
+D  = np.sqrt(np.maximum(D2, 0.0))
+```
+
+* 直接采用矩阵乘法和向量范数，避免了 `(n,d,n)` 巨大张量
+
+
+
+## 向量化示例 2：批量函数求值与外和
+
+[演示](01_numerical.qmd#demo1-4)
+
+* 思考：若 `x` 和 `y` 很大，是否需要分块？如何用 `einsum` 或 `vmap` 实现同样逻辑？
+
+
+
+## 广播 + vmap
+
+* 若已有“对单个样本”的函数 `f(x)`，用 `vmap(f)` 可“自动批量化”：
+
+  * 代替手写的 `for` 循环
+  * 保持函数式风格，便于 JIT
+* 本课后续实例：**批量初值求根**、**批量参数扫描**、**参数扰动下的不确定性量化**
+
+
+
+## 不要盲目向量化
+
+* 数据很大、广播会创建**庞大暂存张量** → 可能**爆内存**
+* 算法逻辑**数据依赖强**，向量化会变得复杂且不直观
+* 工程建议：
+
+  * 先写清楚**数学形式**
+  * 优先考虑**合适的线性代数算子**（矩阵乘、卷积、einsum）
+  * 必要时**分块 + 循环**反而更稳定且更省内存
+
+
+
+## 小结
+
+* **浮点数**：有限位表示 → 舍入误差 → 抵消/稳定重写
+* **条件数 vs 稳定性**：问题敏感度 vs 算法抗误差；前向/后向误差
+* **向量化与广播**：把数学表达式直接翻译成数组算子；内存与复杂度要“有感”
+* 贯穿原则：**先正确（误差/稳定）→ 再高效（向量化/广播/批处理）**
+
+
+
+## 课堂演示 1（抵消与稳定）{#demo1-1}
+
+* 比较以下两种计算在 $x=10^{-12}$ 附近的差异
+
+  * 直接：$\sqrt{1+x}-1$
+  * 稳定：$\displaystyle \frac{x}{\sqrt{1+x}+1}$
+* 观察哪一个在 `float64` 下更接近理论值 $\approx \displaystyle\frac{x}{2}$？
+
+## Demo 1-1
+
+```{python}
+# | code-fold: true
+import numpy as np
+import matplotlib.pyplot as plt
+
+
+def direct(x):
+    return np.sqrt(1 + x) - 1
+
+
+def stable(x):
+    return x / (np.sqrt(1 + x) + 1)
+
+
+def rel_err(approx, truth):
+    return np.abs(approx - truth) / np.maximum(np.abs(truth), np.finfo(float).tiny)
+
+
+# 理论近似真值（x很小时）：(sqrt(1+x)-1) ~ x/2
+def truth_small_x(x):
+    return 0.5 * x
+
+
+xs = np.logspace(-20, -2, 200, dtype=np.float64)
+y_dir = direct(xs)
+y_stb = stable(xs)
+y_ref = truth_small_x(xs)
+
+err_dir = rel_err(y_dir, y_ref)
+err_stb = rel_err(y_stb, y_ref)
+
+print("Sample at x=1e-12:")
+x = 1e-12
+print(" direct :", direct(x))
+print(" stable :", stable(x))
+print(" ref    :", truth_small_x(x))
+
+plt.figure()
+plt.loglog(xs, err_dir, label="direct: sqrt(1+x)-1")
+plt.loglog(xs, err_stb, label="stable: x/(sqrt(1+x)+1)")
+plt.xlabel("x")
+plt.ylabel("relative error vs ~x/2")
+plt.title("Cancellation vs Stable Rewrite")
+plt.legend()
+plt.grid(True, which="both")
+plt.show()
+```
+
+
+
+## 课堂演示 2（Kahan vs 朴素求和）{#demo1-2}
+
+* 构造一个序列：大量小数 + 少量大数，或正负交替
+* 对比 `sum(seq)` 与 `kahan_sum(seq)` 的结果与误差
+* 什么时候补偿求和收益最大？
+
+## Demo 1-2
+
+```{python}
+# | code-fold: true
+import numpy as np
+import time
+
+
+def kahan_sum(x):
+    s = 0.0
+    c = 0.0
+    for v in x:
+        y = v - c
+        t = s + y
+        c = (t - s) - y
+        s = t
+    return s
+
+
+def bench(seq, label):
+    t0 = time.perf_counter()
+    s_np = float(np.sum(seq))
+    t1 = time.perf_counter()
+    s_kh = kahan_sum(seq)
+    t2 = time.perf_counter()
+
+    print(f"\n[{label}] n={len(seq)}")
+    print(f"numpy.sum : {s_np:.17g}  (time={t1 - t0:.4e}s)")
+    print(f"kahan_sum : {s_kh:.17g}  (time={t2 - t1:.4e}s)")
+    print(f"diff      : {s_kh - s_np:.17g}")
+
+
+# 场景A：大量小数 + 少量大数
+N = 2_000_000
+small = np.full(N, 1e-8, dtype=np.float64)
+seqA = np.concatenate([small, np.array([1.0])])  # 真值约 1.0 + N*1e-8 = 1.02e-2 + 1
+bench(seqA, "A")
+
+# 场景B：正负交替的小数（抵消更严重）
+M = 2_000_000
+alt = np.empty(M, dtype=np.float64)
+alt[0::2] = 1e-8
+alt[1::2] = -1e-8
+seqB = np.concatenate([alt, np.array([1.0])])  # 理论真值约 1.0
+bench(seqB, "B")
+```
+
+
+
+## 课堂演示 3（条件数直觉）{#demo1-3}
+
+* 函数 $f(x)=1/(1-x)$，在 $[-0.9,0.9]$ 上画 $|x f'(x)/f(x)|$
+* 观察：靠近 $x=1$ 时条件数急剧上升
+* **问题选择**与**参数化**的艺术：远离病态区域，或做变量变换
+
+## Demo 1-3
+
+```{python}
+# | code-fold: true
+import numpy as np
+import matplotlib.pyplot as plt
+
+
+def f(x):
+    return 1.0 / (1.0 - x)
+
+
+def fp(x):
+    return 1.0 / ((1.0 - x) ** 2)
+
+
+def kappa(x):
+    return np.abs(x * fp(x) / f(x))  # |x f'(x) / f(x)| = |x/(1-x)|
+
+
+xs = np.linspace(-0.9, 0.99, 800, dtype=np.float64)
+kap = kappa(xs)
+
+# 选几点查看数量级
+for v in [0.0, 0.5, 0.9, 0.99, 0.999]:
+    if v < 1.0:
+        print(f"x={v:>6}: kappa={kappa(np.array(v)):.3e}")
+
+plt.figure()
+plt.plot(xs, kap)
+plt.yscale("log")
+plt.xlabel("x")
+plt.ylabel("kappa(f,x) = |x/(1-x)|")
+plt.title("Conditioning of f(x)=1/(1-x)")
+plt.grid(True, which="both")
+plt.show()
+```
+
+
+
+## 课堂演示 4（向量化与广播）{#demo1-4}
+
+* 用广播生成网格并评估 $f(x,y)=\sin(x^2+y^2)$
+* 计时：纯 Python 双循环 vs 向量化实现
+* 内存占用如何评估？何时需要分块？
+
+## Demo 1-4
+
+```{python}
+# | code-fold: true
+import numpy as np
+import time
+
+
+def f_scalar(x, y):  # 标量版
+    return np.sin(x * x + y * y)
+
+
+# 网格规模，可适度调大/调小
+NX, NY = 600, 600
+x = np.linspace(-2.0, 2.0, NX, dtype=np.float64)
+y = np.linspace(-3.0, 3.0, NY, dtype=np.float64)
+
+# 方式一：纯 Python 双循环
+t0 = time.perf_counter()
+Z_loop = np.empty((NX, NY), dtype=np.float64)
+for i in range(NX):
+    xi = x[i]
+    for j in range(NY):
+        Z_loop[i, j] = f_scalar(xi, y[j])
+t1 = time.perf_counter()
+
+# 方式二：广播/向量化
+# x -> (NX,1), y -> (1,NY)
+X = x.reshape(-1, 1)
+Y = y.reshape(1, -1)
+t2 = time.perf_counter()
+Z_vec = np.sin(X * X + Y * Y)
+t3 = time.perf_counter()
+
+# 一致性检查与计时
+max_abs_diff = np.max(np.abs(Z_loop - Z_vec))
+print(f"max |Z_loop - Z_vec| = {max_abs_diff:.3e}")
+print(f"double-loop time     = {t1 - t0:.4f} s")
+print(f"vectorized time      = {t3 - t2:.4f} s")
+print(f"Z_vec memory (MB)    = {Z_vec.nbytes / 1024 / 1024:.2f} MB")
+
+
+# 选学：分块计算，避免一次性大张量
+def chunked_eval(x, y, chunk=256):
+    NX, NY = len(x), len(y)
+    Z = np.empty((NX, NY), dtype=np.float64)
+    for i0 in range(0, NX, chunk):
+        i1 = min(i0 + chunk, NX)
+        X = x[i0:i1].reshape(-1, 1)
+        for j0 in range(0, NY, chunk):
+            j1 = min(j0 + chunk, NY)
+            Y = y[j0:j1].reshape(1, -1)
+            Z[i0:i1, j0:j1] = np.sin(X * X + Y * Y)
+    return Z
+```
+
+
+
+## 课后作业
+
+### a1-1（必做）：验证 `float64` 的机器精度
+
+用数值实验验证 `float64` 的机器精度 $\varepsilon \approx 2^{-52}$，并区分“机器精度（epsilon）”与“单位舍入（unit roundoff, $u$）”。要求提交**简短报告**和**代码**。
+
+请按照下列步骤用 Python 代码验证：
+
+1. 用 `np.nextafter(1.0, +np.inf) - 1.0` 验证 $\varepsilon$ 的数值；
+2. 验证 `1.0 + 2**-52 > 1.0` 且 `1.0 + 2**-53 == 1.0`（四舍五入到偶数）；
+3. 画一张小图或打印若干值，展示 $\mathrm{ulp}(x)$（相邻可表示数间距）与 $|x|$ 近似成正比；
+4. 用简短话语解释为什么**机器精度**是 $2^{-52}$，而**单位舍入**是 $u = 2^{-53}$。
+
+### a1-2（必做）：给出一个“稳定重写”的例子
+
+除了讲义提到的一些，例如 $1-\cos x$（当 $x\to 0$）也是易发生抵消的表达式，写出其“不稳定公式”和“稳定公式”，并用数值实验对比误差。要求提交**简短报告**和**代码**。
+
+请按照下列步骤用 Python 代码验证：
+
+1. 写出“不稳定公式”和“稳定公式”，稳定公式可以从恒等式、特化函数等角度出发考虑（回忆数学课上的知识）；
+2. 给出测试范围（如 $x\in[10^{-16},10^{-2}]$ 的对数刻度网格）；
+3. 以理论近似真值评估两种公式的相对误差曲线，或打印几组典型数值；
+4. 回忆理论，用简短话语解释为什么“稳定公式”是稳定的。
+
+## 预告
+
+* 下一讲：**求根问题**（二分、牛顿、割线）
+* 请带着今天的三个关键词来：**抵消、条件数、向量化**

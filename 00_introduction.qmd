@@ -1,0 +1,301 @@
+---
+title: "绪论"
+---
+
+## 课程导入
+
+* 课程名称：**计算方法**
+* 本讲主题：**课程导入与统一环境配置**
+* 关键词：**可复现、向量化、Array API、数值精度**
+
+
+
+## 本次学习目标
+
+* 理解从 **MATLAB → Python/NumPy → JAX** 的演进逻辑与课程定位
+* 完成 **统一的 Python 环境**：NumPy 为主，JAX（CPU 版）为辅
+* 启用 **JAX 64-bit**；掌握“**可复现实验**”的基本做法
+* 跑通课程仓库的 **自检脚本**
+
+
+
+## 课程定位与评价
+
+* **核心能力**：数值思维 + 工程化（向量化、批处理、可微计算、基准测试）
+* **评价构成**
+
+  * 课后作业：20%
+  * 编程实践：20%
+  * 课程小项目：20%
+  * 期末考试：40%
+* 作业必须可复现（锁版本、固定随机种子、记录设备与 dtype）
+
+
+
+## 为什么从 MATLAB 迁到 Python/NumPy？
+
+* **生态**：数据科学/机器学习/工程工具链更完整（pandas、matplotlib、scipy、scikit-learn 等）
+* **开源与就业**：Python 技术栈应用更广；更易迁移到生产
+* **工程实践**：git、pytest、CI、容器等更易整合
+
+
+
+## 为什么引入 JAX
+
+* **保持 NumPy 风格** 的同时，带来更多利好
+* **不涉及 GPU**，以 **CPU 版 JAX** 为辅线即可
+
+
+
+## 本课的工程化目标
+
+* **NumPy**：清晰可读、验证正确性与收敛、做基线
+* **JAX**：在 NumPy 正确基础上，升级到**可微、并行、可编译**
+* **统一测试与基准**：同一份 API，双后端都能通过测试；同一基准脚本
+
+
+
+## 统一的数组心智模型
+
+* **以数组（array）为中心** 的运算抽象：广播、向量化、通用算子
+* **降低心智成本**，在 NumPy 与 JAX 之间切换更顺滑
+* 实践上，优先使用“**不写显式 for 的向量化**”版本
+
+
+
+## 向量化与广播
+
+* **向量化**：用数组运算替代标量循环
+* **广播**：自动扩展维度以匹配运算（慎用，注意形状）
+
+
+
+## JAX 三件套
+
+* `jit(f)`：第一次慢（因为要编译），之后快（复用编译产物）
+* `vmap(f)`：批处理，把对单个样本的`f`自动拓展到对一批样本的`f`
+* `grad(f)`：以**标量函数**为中心，拿到梯度；配合求根/拟合/优化
+
+
+
+## 数值精度
+
+* 本课程关注**数值稳定性与误差**，`float32` 精度可能不足
+* **NumPy** 默认 `float64`，但 **JAX** 默认 `float32`
+* JAX**一律启用 64-bit**，需显式开启 64-bit
+
+
+
+## 如何启用 JAX 64-bit
+
+```python
+import jax, jax.numpy as jnp
+jax.config.update("jax_enable_x64", True)
+
+x = jnp.array(1.0)
+print(x.dtype)   # 期望看到 float64
+```
+
+* 也可用环境变量：`JAX_ENABLE_X64=1`
+
+
+
+## 环境与安装
+
+统一做法·venv + pip
+
+**Windows（PowerShell）**
+
+```powershell
+python --version
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -U pip
+pip install -U numpy jax
+```
+
+**macOS / Linux（bash/zsh）**
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -U pip
+pip install -U numpy jax
+```
+
+
+
+## 环境与安装（可选方案）
+
+**conda-forge**
+
+```bash
+conda create -n numjax python=3.11 -y
+conda activate numjax
+python -m pip install -U pip
+pip install -U numpy jax
+```
+
+**uv**
+
+```bash
+uv venv
+source .venv/bin/activate
+uv pip install -U numpy jax
+```
+
+> 课堂说明：本课程不安装 GPU 变体（如 `jax[cuda]`），仅用 **CPU 版**
+
+
+
+## 版本与可复现
+
+* 使用**虚拟环境**（`.venv/` 或 `conda env`）隔离依赖
+* 在仓库中放置 `requirements.txt`（或 `pyproject.toml`）
+* **固定随机数种子**、记录 `numpy` 或 `jax` 版本、设备、`dtype`
+* 作业提交需包含：
+  * **运行环境信息**
+  * **关键图表/指标**
+  * **代码**
+
+
+
+## 课程仓库结构
+
+```
+course/
+  README.md
+  requirements.txt         # numpy>=2.0 ; jax>=0.4
+  src/
+    backend.py
+  scripts/
+    print_env.py
+  00_introduction.qmd
+  # other qmd files...
+  smoke_test.py
+  .gitignore
+```
+
+
+
+## 自检脚本
+
+* 打印版本、设备、`dtype`，检查是否开启 **float64**
+* 做一个简单的 **求和对比**（普通求和 vs Kahan 求和）
+* 生成 `smoke_test.json`，作为**作业提交材料**之一
+
+
+
+## 自检脚本：环境打印
+
+> `scripts/print_env.py` 
+
+```python
+import sys, platform, json
+import numpy as np
+import jax, jax.numpy as jnp
+jax.config.update("jax_enable_x64", True)
+
+out = {
+  "python": sys.version.split()[0],
+  "platform": platform.platform(),
+  "numpy": np.__version__,
+  "jax": jax.__version__,
+  "devices": [str(d) for d in jax.devices()],
+  "dtype_check": str(jnp.array(1.0).dtype),
+}
+print(json.dumps(out, indent=2, ensure_ascii=False))
+```
+
+
+
+## 自检脚本：Kahan 求和
+
+```python
+def kahan_sum(x):
+    s = 0.0; c = 0.0
+    for v in x:
+        y = v - c
+        t = s + y
+        c = (t - s) - y
+        s = t
+    return s
+```
+
+* **数值更稳定**的求和方法，体现“误差累积”的现实性
+* 什么样的数据更容易暴露“灾难性抵消”？
+
+
+
+## 自检脚本：完整样例
+
+> `smoke_test.py`
+
+```{python}
+# | code-fold: true
+import time, json, numpy as np
+import jax, jax.numpy as jnp
+
+jax.config.update("jax_enable_x64", True)
+
+
+def kahan_sum(x):
+    s = 0.0
+    c = 0.0
+    for v in x:
+        y = v - c
+        t = s + y
+        c = (t - s) - y
+        s = t
+    return s
+
+
+x = np.ones(10_000_000, dtype=np.float64) * 1e-8
+t0 = time.time()
+s_np = x.sum()
+t1 = time.time()
+s_kahan = kahan_sum(x)
+t2 = time.time()
+s_jax = jnp.asarray(x).sum().item()
+
+result = {
+    "env": {
+        "numpy": np.__version__,
+        "jax": jax.__version__,
+        "devices": [str(d) for d in jax.devices()],
+        "dtype": str(jnp.array(1.0).dtype),
+    },
+    "sum_numpy": float(s_np),
+    "sum_kahan": float(s_kahan),
+    "sum_jax": float(s_jax),
+    "timing_sec": {"numpy_sum": t1 - t0, "kahan": t2 - t1},
+}
+with open("smoke_test.json", "w", encoding="utf-8") as f:
+    json.dump(result, f, indent=2, ensure_ascii=False)
+print("OK. Wrote smoke_test.json")
+```
+
+
+
+## 如何运行自检脚本
+
+```bash
+# 进入虚拟环境后
+python scripts/print_env.py
+python smoke_test.py
+# 观察：设备（CpuDevice）、dtype（float64）、sum 对比与耗时
+# 课堂提交：smoke_test.json + 运行截图
+```
+
+
+## 作业与提交
+
+截止日期：下一次上课之前
+
+1. 提交 `smoke_test.json` 与运行截图（含设备与 dtype）
+
+
+
+## 下次课预告
+
+
