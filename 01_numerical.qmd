@@ -475,7 +475,7 @@ D  = np.sqrt(np.maximum(D2, 0.0))
 
   * 直接：$\sqrt{1+x}-1$
   * 稳定：$\displaystyle \frac{x}{\sqrt{1+x}+1}$
-* 观察哪一个在 `float64` 下更接近理论值 $\approx \displaystyle\frac{x}{2}$？
+* 观察哪一个在指定数值精度下更接近理论值 $\approx \displaystyle\frac{x}{2}$？
 
 ## Demo 1-1
 
@@ -485,45 +485,55 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 
-def direct(x):
-    return np.sqrt(1 + x) - 1
+def g_unstable(x):
+    return np.sqrt(1.0 + x) - 1.0
 
 
-def stable(x):
-    return x / (np.sqrt(1 + x) + 1)
+def g_stable(x):
+    return x / (np.sqrt(1.0 + x) + 1.0)
 
 
-def rel_err(approx, truth):
-    return np.abs(approx - truth) / np.maximum(np.abs(truth), np.finfo(float).tiny)
+def relerr(a, b):
+    tiny = np.finfo(float).tiny
+    return np.abs(a - b) / np.maximum(np.abs(b), tiny)
 
 
-# 理论近似真值（x很小时）：(sqrt(1+x)-1) ~ x/2
-def truth_small_x(x):
-    return 0.5 * x
+# 32 位精度
+xs = np.logspace(-20, -2, 200, dtype=np.float32)
+y_unst = g_unstable(xs)
+y_stab = g_stable(xs)
 
+# 理论上的一阶近似参考：(sqrt(1+x)-1) ~ x/2
+y_ref = 0.5 * xs
+err_unst = relerr(y_unst, y_ref)
+err_stab = relerr(y_stab, y_ref)
 
-xs = np.logspace(-20, -2, 200, dtype=np.float64)
-y_dir = direct(xs)
-y_stb = stable(xs)
-y_ref = truth_small_x(xs)
+# 画图
+fig, axes = plt.subplots(2, 1, figsize=(6, 9))
 
-err_dir = rel_err(y_dir, y_ref)
-err_stb = rel_err(y_stb, y_ref)
+# 左图：函数值对比
+axes[0].plot(xs, y_unst, label=r"unstable: $\sqrt{1+x}-1$")
+axes[0].plot(xs, y_stab, label=r"stable: $\dfrac{x}{\sqrt{1+x}+1}$", linestyle="--")
+axes[0].plot(xs, y_ref, label=r"reference: $x/2$", linestyle=":")
+axes[0].set_xscale("log")
+axes[0].set_xlabel("x")
+axes[0].set_ylabel("value")
+axes[0].set_title("Values near x → 0")
+axes[0].legend()
+axes[0].grid(True, which="both", alpha=0.3)
 
-print("Sample at x=1e-12:")
-x = 1e-12
-print(" direct :", direct(x))
-print(" stable :", stable(x))
-print(" ref    :", truth_small_x(x))
+# 右图：相对误差（对数坐标）
+axes[1].plot(xs, err_unst, label="relative error (unstable)")
+axes[1].plot(xs, err_stab, label="relative error (stable)", linestyle="--")
+axes[1].set_xscale("log")
+axes[1].set_yscale("log")
+axes[1].set_xlabel("x")
+axes[1].set_ylabel("relative error vs x/2")
+axes[1].set_title("Cancellation effect on relative error")
+axes[1].legend()
+axes[1].grid(True, which="both", alpha=0.3)
 
-plt.figure()
-plt.loglog(xs, err_dir, label="direct: sqrt(1+x)-1")
-plt.loglog(xs, err_stb, label="stable: x/(sqrt(1+x)+1)")
-plt.xlabel("x")
-plt.ylabel("relative error vs ~x/2")
-plt.title("Cancellation vs Stable Rewrite")
-plt.legend()
-plt.grid(True, which="both")
+plt.tight_layout()
 plt.show()
 ```
 

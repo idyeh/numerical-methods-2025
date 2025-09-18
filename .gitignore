@@ -229,3 +229,4 @@ _site/
 *.qmd.bak
 *.qmd~
 *.qmd#
+/.quarto/

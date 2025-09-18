@@ -1,0 +1,1180 @@
+---
+title: "非线性方程求根"
+---
+
+## 本讲导入
+
+* 主题：对非线性方程 $f(x)=0$ 求根
+* 方法谱系：**二分法**（保序收敛）、**牛顿法**（局部二阶）、**割线法**（超线性）
+* 评价维度：**收敛阶**、**停止准则**、**数值健壮性**（抵消、溢出、导数退化和发散）
+
+## 动机
+- 大量科学与工程问题都可化为求 $f(x)=0$
+  - **参数标定 / 反演**：根据观测 $y$ 找参数 $\theta$，令残差函数 $r(\theta)=0$。  
+    例：期权交易的**隐含波动率**（Black–Scholes方程）$\;C_{\text{BS}}(\sigma)-C_{\text{mkt}}=0$。  
+  - **天体物理**：**开普勒方程** $E - e\sin E - M=0$（给定偏心率 $e$、平近点角 $M$ 求偏近点角 $E$）。  
+  - **机器学习**：一维最优化的一阶必要条件 $\;f'(x^*)=0$ 等价于求根（多维情形转为方程组）。  
+- 建立策略选择思维：  
+  - 有些方法“**必收敛但慢**”（二分法）；有些方法“**快但易发散**”（牛顿法、割线法）。  
+  - 实际工程中常用**混合**方法：兜底的区间法 + 快速的切线/割线法。
+
+::: callout
+关于 Black–Scholes 定价公式与隐含波动率方程，可设：现价 $S_0$，执行价 $K$，无风险利率 $r$，到期时长 $T>0$，波动率 $\sigma>0$，标准正态分布的分布函数 $N(\cdot)$。
+定义
+
+$$
+d_1=\frac{\ln\!\frac{S_0}{K}+(r+\tfrac12\sigma^2)T}{\sigma\sqrt{T}},
+\qquad
+d_2=d_1-\sigma\sqrt{T}.
+$$
+
+欧式看涨、看跌期权的 Black–Scholes 价格：
+
+$$
+C_{\mathrm{BS}}(\sigma)=S_0\,N(d_1)-K\,e^{-rT}N(d_2),
+$$
+
+$$
+P_{\mathrm{BS}}(\sigma)=K\,e^{-rT}N(-d_2)-S_0\,N(-d_1).
+$$
+
+隐含波动率方程写作：
+
+$$
+f_{\text{call}}(\sigma)=C_{\mathrm{BS}}(\sigma)-C_{\text{mkt}}=0,
+\qquad
+f_{\text{put}}(\sigma)=P_{\mathrm{BS}}(\sigma)-P_{\text{mkt}}=0.
+$$
+
+若标的支付连续复利的红利率 $q$，则
+
+$$
+d_1=\frac{\ln\!\frac{S_0}{K}+\bigl(r-q+\tfrac12\sigma^2\bigr)T}{\sigma\sqrt{T}},
+\qquad
+d_2=d_1-\sigma\sqrt{T},
+$$
+
+$$
+C_{\mathrm{BS}}(\sigma)=S_0e^{-qT}N(d_1)-K e^{-rT}N(d_2),
+$$
+
+$$
+P_{\mathrm{BS}}(\sigma)=K e^{-rT}N(-d_2)-S_0e^{-qT}N(-d_1).
+$$
+
+隐含波动率方程同上：令 $C_{\mathrm{BS}}(\sigma)=C_{\text{mkt}}$（或 $P_{\mathrm{BS}}(\sigma)=P_{\text{mkt}}$），对 $\sigma$ 求解。
+:::
+
+::: callout
+关于开普勒方程的简短推导。首先椭圆上一点的坐标可用偏近点角 $E$ 表为
+
+$$
+  x = a(\cos E - e),\qquad y = b\sin E,\qquad b=a\sqrt{1-e^2}.
+$$
+
+由此立刻得到径向距离
+
+$$
+  r=\sqrt{x^2+y^2}
+   = a\sqrt{(\cos E-e)^2+(1-e^2)\sin^2E}
+   = a\,(1-e\cos E).
+$$
+
+以焦点为极点，扫过的面积从近拱点（$E=0$）积到 $E$ 为
+
+$$
+  A(E)
+  = \frac12\int_{0}^{E}\bigl(x\,dy - y\,dx\bigr)
+  = \frac12\int_{0}^{E}ab\,[1-e\cos u]\,du
+  = \frac{ab}{2}\,\bigl(E - e\sin E\bigr).
+$$
+
+上式用到 $dx=-a\sin u\,du,\ dy=b\cos u\,du$。
+
+根据开普勒第二定律：单位时间扫过面积恒定。设轨道周期为 $T$，整椭圆面积为 $\pi ab$，则
+
+$$
+  \frac{dA}{dt}=\frac{\pi ab}{T}
+  \quad\Rightarrow\quad
+  A(E)=\frac{\pi ab}{T}\,(t-\tau),
+$$
+
+其中 $\tau$ 为近拱点通过时刻。令平近点角
+
+$$
+  M \;\equiv\; n(t-\tau),\qquad n=\frac{2\pi}{T},
+$$
+
+则上式与 $A(E)=\frac{ab}{2}(E-e\sin E)$ 比较得
+
+$$
+  \,M \;=\; E - e\sin E\,
+$$
+
+这就是**开普勒方程**。给定 $M$（即时间），通过求解上式的根可得到 $E$。
+:::
+
+## 问题刻画与术语
+
+* 目标：求 $x^*$ 使得 $f(x^*)=0$
+* **根的类型**：简单根 $f'(x^*)\neq 0$、重根 $f'(x^*)=0$
+* **收敛阶 $p$**：定义误差 $e_k=|x_k-x^*|$。若 $\lim_{k\to\infty}\dfrac{|e_{k+1}|}{|e_k|^p}=C\in(0,\infty)$，则称序列 $\{x_k\}$ 以阶 $p$ 收敛到 $x^*$
+
+  * 线性：$p=1$；二阶：$p=2$；超线性：$1<p<2$
+* **停止准则**
+
+  1. **步长准则**：$|x_{k+1}-x_k| \le \max(\text{xtol},\,\text{rtol}\cdot|x_{k+1}|)$
+  2. **残差准则**：$|f(x_{k+1})| \le \text{ftol}$
+
+## 二分法
+
+二分法（bisection）是保序线性收敛的“兜底”方法
+
+* 条件：存在区间 $[a,b]$ 使 $f(a)\cdot f(b)\le 0$（变号或端点为根）
+* 迭代：反复取中点 $c=(a+b)/2$，用符号决定保留的半区间
+* 性质：**单调**缩小区间（区间长度每步减半），**线性收敛**，不会发散；无需计算导数
+* 用途：兜底保障
+
+### 算法伪代码
+```text
+Input: f, a, b, xtol, ftol, maxit
+Require: f(a)*f(b) ≤ 0
+for k = 1..maxit:
+    c = (a + b)/2
+    if |f(c)| ≤ ftol or (b - a)/2 ≤ xtol*(1+|c|):
+        return c
+    if f(a)*f(c) ≤ 0:
+        b ← c
+    else:
+        a ← c
+return c   # 达到迭代上限，返回当前中点
+```
+
+停止准则：残差 $∣f(c)∣$ 足够小或区间半径足够小（含相对阈值），并设 `maxit` 上限
+
+### 二分法 NumPy 实现
+
+```{python}
+import numpy as np
+
+def bisect(f, a, b, xtol=1e-12, ftol=1e-12, maxit=100):
+    fa, fb = f(a), f(b)
+    if not np.isfinite(fa) or not np.isfinite(fb):
+        raise ValueError("f(a) or f(b) is not finite.")
+    if fa*fb > 0:
+        raise ValueError("Sign(a) and Sign(b) must differ (or include zero).")
+    for k in range(1, maxit+1):
+        c = 0.5 * (a + b)
+        fc = f(c)
+        if not np.isfinite(fc):
+            raise FloatingPointError("f(mid) is not finite.")
+        # 停止：残差或区间长度
+        if abs(fc) <= ftol or 0.5*(b-a) <= xtol*(1+abs(c)):
+            return c, k
+        # 方向更新
+        if fa*fc <= 0:
+            b, fb = c, fc
+        else:
+            a, fa = c, fc
+    return c, maxit  # 达到迭代上限也返回当前估计
+```
+
+### 迭代过程示意
+**示例函数**：$f(x)=x^2-2$，根为 $\sqrt{2}\approx 1.4142$，初始区间 $[1,2]$。  
+
+```{python}
+# | code-fold: true
+import numpy as np
+import matplotlib.pyplot as plt
+
+
+def f(x):
+    return x**2 - 2.0
+
+
+# 记录前6步二分迭代
+a, b = 1.0, 2.0
+maxit = 6
+midpoints, intervals = [], []
+for k in range(maxit):
+    c = 0.5 * (a + b)
+    midpoints.append(c)
+    intervals.append((a, b))
+    if f(a) * f(c) <= 0:
+        b = c
+    else:
+        a = c
+
+xx = np.linspace(0.8, 2.2, 400)
+yy = f(xx)
+
+plt.figure(figsize=(7, 4))
+plt.axhline(0, color="k", linewidth=1)
+plt.plot(xx, yy, label=r"$f(x)=x^2-2$")
+# 画出每步的区间与中点
+for k, (ab, c) in enumerate(zip(intervals, midpoints), start=1):
+    a_k, b_k = ab
+    plt.plot([a_k, a_k], [-1.5, 1.5], "k--", alpha=0.2)
+    plt.plot([b_k, b_k], [-1.5, 1.5], "k--", alpha=0.2)
+    plt.plot(c, f(c), "o", color="C1")
+    plt.annotate(
+        f"{k}",
+        xy=(c, 0),
+        xytext=(0, 12),
+        textcoords="offset points",
+        ha="center",
+        color="C1",
+        alpha=(k + 1) / (maxit + 1),
+    )
+plt.xlim(0.9, 2.1)
+plt.ylim(-1.5, 2.0)
+plt.legend()
+plt.title(f"Bisection: intervals and midpoints (first {maxit} steps)")
+plt.xlabel("x")
+plt.ylabel("f(x)")
+plt.tight_layout()
+plt.show()
+```
+
+
+## 牛顿法
+
+牛顿法（Newton）是局部二阶收敛的主力方法
+
+* 迭代：
+$$
+x_{k+1} = x_k - \displaystyle\frac{f(x_k)}{f'(x_k)}
+$$
+
+* 在**简单根**附近，若初值充分接近，通常**二阶收敛**
+* 风险：
+  * 远离根时可能发散
+  * 当 $f'(x_k)\approx 0$ 时步长爆炸
+
+::: callout-tip
+标准牛顿步 $\Delta x = -f(x)/f'(x)$ 可能过大导致发散或越界。
+
+- **阻尼（damping）**用缩放因子 $\lambda\in(0,1]$ 更新 $x_{\text{new}} = x - \lambda\,\dfrac{f(x)}{f'(x)}$。  
+- **回溯（backtracking）**则是从 $\lambda=1$ 开始，若不满足**接受准则**（如 $|f(x_{\text{new}})|<|f(x)|$），就令 $\lambda \leftarrow \beta\lambda$（如 $\beta=0.5$ 即“折半”）逐渐缩小，直到满足。  
+
+如此一来，在远离根或导数异常时提升**稳健性**；在近根区域通常仍能获得二阶收敛。
+:::
+
+### 牛顿法 NumPy 实现
+
+```{python}
+import numpy as np
+
+def newton(f, df, x0, xtol=1e-12, ftol=1e-12, maxit=50, damping=True):
+    x = float(x0)
+    fx = f(x)
+    for k in range(1, maxit+1):
+        if abs(fx) <= ftol:
+            return x, k
+        dfx = df(x)
+        if not np.isfinite(dfx) or dfx == 0.0:
+            raise ZeroDivisionError("Derivative is zero or non-finite.")
+        step = fx/dfx
+        if damping:
+            lam = 1.0
+            # 回溯线搜索：保证 |f(x - lam*step)| < |f(x)|
+            for _ in range(20):
+                xn = x - lam*step
+                fn = f(xn)
+                if np.isfinite(fn) and abs(fn) < abs(fx):
+                    break
+                lam *= 0.5
+            x_prev, x, fx = x, xn, fn
+        else:
+            x_prev, x = x, x - step
+            fx = f(x)
+        # 步长停止
+        if abs(x - x_prev) <= max(xtol, xtol*abs(x)):
+            return x, k
+    return x, maxit
+```
+
+### 迭代过程示意
+同样使用 $f(x)=x^2-2$，从初值 $x_0=1.5$ 出发，展示前 4 步的切线与交点。
+
+```{python}
+# | code-fold: true
+import numpy as np
+import matplotlib.pyplot as plt
+
+
+def f(x):
+    return x**2 - 2.0
+
+
+def df(x):
+    return 2.0 * x
+
+
+# 生成牛顿迭代轨迹
+xs = [1.5]
+maxit = 4
+for _ in range(maxit):
+    x = xs[-1]
+    x_new = x - f(x) / df(x)
+    xs.append(x_new)
+
+xx = np.linspace(0.8, 2.2, 400)
+yy = f(xx)
+
+plt.figure(figsize=(7, 4))
+plt.axhline(0, color="k", linewidth=1)
+plt.plot(xx, yy, label=r"$f(x)=x^2-2$")
+
+# 绘制每一步的切线与交点
+for k in range(len(xs) - 1):
+    xk, xk1 = xs[k], xs[k + 1]
+    # 切线： y = f(xk) + f'(xk)*(x - xk)
+    yk = f(xk)
+    gk = df(xk)
+    xt = np.linspace(xk - 0.6, xk + 0.6, 50)
+    yt = yk + gk * (xt - xk)
+    plt.plot(xt, yt, "--", color="C2", alpha=0.8)
+    # 标注 x_k 与 x_{k+1}
+    plt.plot(xk, f(xk), "o", color="C2")
+    plt.annotate(
+        f"${k}$",
+        xy=(xk, f(xk)),
+        xytext=(5, 8),
+        textcoords="offset points",
+        color="C2",
+        alpha=(k + 1) / (maxit + 1),
+    )
+
+plt.xlim(1.3, 1.51)
+plt.ylim(-1.5, 2.0)
+plt.legend()
+plt.title(f"Newton: tangents and updates (first {maxit} steps)")
+plt.xlabel("x")
+plt.ylabel("f(x)")
+plt.tight_layout()
+plt.show()
+```
+
+
+## 导数与差商
+- **导数（derivative）**：在点 $x$ 处，函数的瞬时变化率  
+  $$
+  f'(x) \;=\; \lim_{h\to 0}\frac{f(x+h)-f(x)}{h}
+  $$
+  其几何意义是切线（tangent）的斜率
+- 一阶**差商（difference quotient）**：给定两点 $x_{k-1},x_k$，
+  $$
+  f[x_{k-1},x_k] \;\equiv\; \frac{f(x_k)-f(x_{k-1})}{x_k-x_{k-1}}
+  $$
+  是对 $f'(x)$ 的近似代替，其几何意义是割线（secant）的斜率。有限差分（finite difference）的话题中还会提及
+- **与两种方法的关系**  
+  - **牛顿法**用**切线斜率** $f'(x_k)$，需要求导数 
+  - **割线法**用**差商/差分斜率** $f[x_{k-1},x_k]$ 近似 $f'(x_k)$，不用求导数  
+
+
+## 割线法
+
+割线法（secant）是一种避免求导数的超线性方法
+
+* 用两次函数值求**割线斜率**近似导数
+
+  $$
+  x_{k+1} = x_k - f(x_k)\,\frac{x_k-x_{k-1}}{f(x_k)-f(x_{k-1})}
+  $$
+* 收敛阶 $p \approx 1.618$（超线性）；不需显式计算 $f'(x)$
+* 风险：分母接近 0；需健壮处理
+
+::: callout-note
+数值健壮性（numerical robustness）是算法对数据/舍入扰动与不良初值的**抵抗力**与**安全退让机制**
+:::
+
+### 割线法：NumPy 实现
+
+```{python}
+import numpy as np
+
+def secant(f, x0, x1, xtol=1e-12, ftol=1e-12, maxit=80):
+    x_prev, x = float(x0), float(x1)
+    f_prev, fx = f(x_prev), f(x)
+    for k in range(1, maxit+1):
+        if abs(fx) <= ftol:
+            return x, k
+        denom = fx - f_prev
+        if denom == 0 or not np.isfinite(denom):
+            raise ZeroDivisionError("Denominator near zero or non-finite.")
+        step = fx*(x - x_prev)/denom
+        x_prev, f_prev = x, fx
+        x = x - step
+        fx = f(x)
+        if abs(step) <= max(xtol, xtol*abs(x)):
+            return x, k
+    return x, maxit
+```
+
+## 小结：收敛阶与停止准则
+
+* **二分法**：线性收敛；停止准则可用区间半长与 $|f|$ 并用
+* **牛顿法**：理论上是**二阶**，但需满足简单根、初值足够近、$f' \ne 0$
+* **割线法**：黄金分割超线性，免导数
+* 停止准则建议：
+
+  * 步长阈值 `xtol` 与 `rtol` 并用，外加残差阈值 `ftol`
+  * 设置 `maxit` 上限；**失败也应返回**当前最优估计与状态码
+
+
+### 方法对比
+
+求解 $f(x)=\cos x - x$ 在 $[0,1]$ 上的根
+
+```{python}
+import numpy as np
+
+
+def f(x):
+    return np.cos(x) - x
+
+
+def df(x):
+    return -np.sin(x) - 1.0
+
+
+root_true = 0.73908513321516064166  # 参考
+
+# 二分需先找变号区间
+x_bi, it_bi = bisect(f, 0.0, 1.0)
+x_nt, it_nt = newton(f, df, x0=0.5, damping=True)
+x_sc, it_sc = secant(f, 0.0, 1.0)
+
+print("bisect :", x_bi, it_bi, abs(x_bi - root_true))
+print("newton :", x_nt, it_nt, abs(x_nt - root_true))
+print("secant :", x_sc, it_sc, abs(x_sc - root_true))
+```
+
+
+### 编写单元测试
+
+```{python}
+def approx(a, b, tol=1e-10):
+    return abs(a - b) <= tol * (1 + max(abs(a), abs(b)))
+
+
+def test_root_cosx_minus_x():
+    r, it = newton(lambda x: np.cos(x) - x, lambda x: -np.sin(x) - 1, 0.5)
+    assert approx(r, root_true, 1e-10)
+
+
+def test_bisect_sign_change():
+    r, it = bisect(lambda x: (x - 1) * (x + 2), -1, 2)
+    assert approx(r, 1.0, 1e-12)
+
+
+def test_secant_basic():
+    r, it = secant(lambda x: x**2 - 2, 0.0, 2.0)
+    assert approx(r, np.sqrt(2.0), 1e-10)
+
+
+test_root_cosx_minus_x()
+test_bisect_sign_change()
+test_secant_basic()
+print("unit tests passed")
+```
+
+
+## 数值健壮性：常见问题与对策
+
+* **导数退化**：$f'(x)\approx 0$ 牛顿步长过大，考虑启用**阻尼（回溯线搜索）**或**混合法（区间约束）**
+* 远离根或不良构函数会**发散**，先用**扫描法**找**变号区间**，再用二分或混合法兜底
+* 迭代上限、数值非有限（`NaN` / `Inf`）时返回当前最优估计与状态码
+* 必要时对变量/函数进行缩放，减少过小/过大量级造成的舍入放大
+
+## 重根问题
+- 若 $f(x)=(x-x^*)^m g(x)$，且 $g(x^*)\neq 0$，则 $x^*$ 为**重根（multiple roots）**，重数 $m>1$。  
+- 标准牛顿在重根处仅**线性收敛**，误差递推近似
+  $$
+  e_{k+1} \;\approx\; \frac{m-1}{m}\,e_k, \quad e_k=|x_k-x^*|.
+  $$
+- 可作以下改进：  
+  1. **修正牛顿法**（若已知 $m$）  
+     $$
+     x_{k+1}\;=\;x_k - \frac{m\,f(x_k)}{f'(x_k)}.
+     $$
+  2. **自适应估计 $m$**（需二阶导，或用差分近似）  
+     $$
+     \hat m(x)\;=\;\frac{[f'(x)]^2}{f'(x)^2 - f(x)f''(x)}
+     $$
+     然后令 $x_{k+1}=x_k-\hat m(x_k)\,f(x_k)/f'(x_k)$。  
+  3. **混合法**：保持区间约束（如二分/截距回退），防止大步发散。
+
+### 重根问题：示例
+$f(x)=(x-1)^2$，以 $x_0=1.5$。注意对比标准牛顿和修正牛顿的表现
+```{python}
+# | code-fold: true
+import numpy as np
+
+
+# 重根示例：f(x) = (x-1)^2
+def f(x):
+    return (x - 1.0) ** 2
+
+
+def df(x):
+    return 2.0 * (x - 1.0)
+
+
+def newton_standard(x0, it=5, xtol=1e-12, ftol=1e-12):
+    """标准牛顿"""
+    xs = [float(x0)]
+    for _ in range(it):
+        x = xs[-1]
+        fx = f(x)
+        # 先检查是否已到根或非常接近根
+        if abs(fx) <= ftol:
+            break
+        dfx = df(x)
+        if dfx == 0.0 or not np.isfinite(dfx):
+            # 导数为零/非有限时直接退出，或可切换到兜底策略
+            break
+        x_new = x - fx / dfx
+        xs.append(x_new)
+        if abs(x_new - x) <= xtol * (1.0 + abs(x_new)):
+            break
+    return xs
+
+
+def newton_modified(x0, m=2, it=5, xtol=1e-12, ftol=1e-12):
+    """修正牛顿（已知重数 m）。先判断 |f(x)| 再做除法，避免 f'=0 时除零。"""
+    xs = [float(x0)]
+    for _ in range(it):
+        x = xs[-1]
+        fx = f(x)
+        # 先检查是否已到根或非常接近根
+        if abs(fx) <= ftol:
+            break
+        dfx = df(x)
+        if dfx == 0.0 or not np.isfinite(dfx):
+            # 对于重根例子，若已非常接近根，f'(x) 可能为 0，此时直接退出即可
+            break
+        x_new = x - m * fx / dfx
+        xs.append(x_new)
+        if abs(x_new - x) <= xtol * (1.0 + abs(x_new)):
+            break
+    return xs
+
+
+xs_std = newton_standard(1.5, it=5)
+xs_mod = newton_modified(1.5, m=2, it=5)
+
+print("standard newton:", xs_std)
+print("modified newton:", xs_mod)
+```
+
+## 抵消现象
+
+- 当计算 $f(x)$ 本身就含有“两大数相减”的结构时，靠近根的区域可能出现**灾难性抵消**，使得
+
+  1. $f(x)$ 的有效位数损失，残差评估不可靠；  
+  2. 牛顿步 $f(x)/f'(x)$ 因**分子/分母同为小量**而放大舍入误差。
+- 因此要对 $f$ 做**稳定重写**，或使用**特化函数**，例如：
+  - $f(x)=\sqrt{1+x}-1$（根在 $x^*=0$）的稳定式：$\displaystyle f(x)=\frac{x}{\sqrt{1+x}+1}$  
+  - $f(x)=1-\cos x$（根在 $x^*=0$）的稳定式：$\displaystyle f(x)=2\sin^2\!\frac{x}{2}$
+
+::: callout-tip
+在建模阶段优先选择稳定等价形式的 $f$；在实现阶段对“非常接近 0 的差值/比值”加阈值保护与混合步，如失败则回退到区间法。
+:::
+
+
+## 附：牛顿法的数学推导
+
+**目标**：求解 $f(x)=0$ 的根 $x^*$，在迭代点 $x_k$ 附近构造线性近似并求其零点，得到更新公式。
+
+**前提**
+
+* $f\in C^2$ 于 $x^*$ 的邻域；
+* $f(x^*)=0,\; f'(x^*)\neq 0$；
+* 迭代点 $x_k$ 充分接近 $x^*$（从而 $x_k\to x^*$）。
+
+**1. 局部线性化**  
+在 $x_k$ 处对 $f$ 作拉格朗日余项形式的一阶泰勒展开：
+$$
+f(x)\;=\;f(x_k)+f'(x_k)(x-x_k)+R_2(x;x_k),\qquad
+R_2(x;x_k)=\displaystyle\frac12 f''(\xi_k)\,(x-x_k)^2
+$$
+
+其中 $\xi_k$ 位于 $x$ 与 $x_k$ 之间。
+
+**2. 用线性近似的零点替代原方程的零点**  
+忽略二阶余项 $R_2$，把线性近似的零点当作下一次迭代值 $\,x_{k+1}$：
+$$
+0 \approx f(x_k)+f'(x_k)(x_{k+1}-x_k)
+\;\Rightarrow\;
+x_{k+1} \;=\; x_k - \frac{f(x_k)}{f'(x_k)}.
+$$
+
+这就是**牛顿法**（Newton’s method）迭代式
+
+## 附：牛顿法二阶收敛证明
+
+设 $x^*$ 为**简单根**（$f(x^*)=0,\;f'(x^*)\neq 0$），记误差 $e_k=x_k-x^*$。  
+对 $f(x_k)$ 在 $x^*$ 处作二阶泰勒展开：
+$$
+f(x_k)=f'(x^*)\,e_k+\frac12 f''(\zeta_k)\,e_k^2,
+\qquad \zeta_k \text{ 介于 } x_k \text{ 与 } x^* \text{ 之间}.
+$$
+
+对 $f'(x_k)$ 在 $x^*$ 处作一阶展开：
+$$
+f'(x_k)=f'(x^*)+f''(\eta_k)\,e_k,
+\qquad \eta_k \text{ 介于 } x_k \text{ 与 } x^* \text{ 之间}.
+$$
+
+代入牛顿法迭代式并化为误差形式：
+$$
+\begin{aligned}
+e_{k+1}
+&=x_{k+1}-x^*
+= x_k - x^* - \frac{f(x_k)}{f'(x_k)}
+= e_k - \frac{f'(x^*)e_k + \frac12 f''(\zeta_k)e_k^2}{\,f'(x^*)+f''(\eta_k)e_k\,}.
+\end{aligned}
+$$
+
+提取公因子并做严格代数整理，先从分子提取 $e_k$，得到
+
+$$
+e_{k+1}
+= e_k - e_k\cdot \frac{\,f'(x^*) + \frac12 f''(\zeta_k)e_k\,}{\,f'(x^*) + f''(\eta_k)e_k\,}.
+$$
+
+把右侧写成一个共同分母的差：
+
+$$
+\begin{aligned}
+e_{k+1}
+&= e_k\cdot
+\frac{\,\bigl(f'(x^*)+f''(\eta_k)e_k\bigr) - \bigl(f'(x^*) + \frac12 f''(\zeta_k)e_k\bigr)\,}
+{\,f'(x^*) + f''(\eta_k)e_k\,} \\
+&= e_k\cdot
+\frac{\,\bigl(f''(\eta_k)-\frac12 f''(\zeta_k)\bigr)e_k\,}
+{\,f'(x^*) + f''(\eta_k)e_k\,}.
+\end{aligned}
+$$
+
+于是得到**含误差项的精确表达式**：
+
+$$
+\boxed{%
+\displaystyle
+e_{k+1}
+= \frac{\,f''(\eta_k)-\frac12 f''(\zeta_k)\,}{\,f'(x^*) + f''(\eta_k)e_k\,}\; e_k^{\,2}.
+}
+\tag{★}
+$$
+
+> $\eta_k$ 和 $\zeta_k$ 是由均值定理保证存在的点。
+
+将（★）两边取绝对值并除以 $|e_k|^2$：
+
+$$
+\frac{|e_{k+1}|}{|e_k|^2}
+= \frac{\,\bigl|\,f''(\eta_k)-\frac12 f''(\zeta_k)\,\bigr|\,}
+{\,\bigl|\,f'(x^*) + f''(\eta_k)e_k\,\bigr|\,}.
+$$
+
+* 因 $x_k\to x^*$ 且 $\eta_k,\zeta_k$ 位于 $x_k$ 与 $x^*$ 之间，故 $\eta_k\to x^*$, $\zeta_k\to x^*$。
+* $e_k\to 0$。
+* 由连续性，$f''(\eta_k)\to f''(x^*)$, $f''(\zeta_k)\to f''(x^*)$。
+* 分母 $\;f'(x^*) + f''(\eta_k)e_k \to f'(x^*) \neq 0$。因此，对充分大的 $k$，分母保持**远离 0**，可合法进行极限的分式运算。
+
+据此，对上式直接取极限，并利用极限与连续函数复合的交换性：
+
+$$
+\begin{aligned}
+\lim_{k\to\infty}\frac{|e_{k+1}|}{|e_k|^2}
+&= \frac{\,\bigl|\; \lim_{k\to\infty}\bigl(f''(\eta_k)-\tfrac12 f''(\zeta_k)\bigr)\;\bigr|\,}
+{\,\bigl|\; \lim_{k\to\infty}\bigl(f'(x^*) + f''(\eta_k)e_k\bigr)\;\bigr|\,} \\
+&= \frac{\,\bigl|\, f''(x^*) - \tfrac12 f''(x^*) \,\bigr|\,}{\,|\,f'(x^*)\,|} \\
+&= \left|\frac{f''(x^*)}{2\,f'(x^*)}\right|\in(0,\infty).
+\end{aligned}
+$$
+
+从而确立**二阶收敛**。
+
+
+## 附：收敛阶的直观估计实验
+
+比较二分法/牛顿法/割线法在
+$f(x)=x^2-2$（真根 $x^*=\sqrt{2}$）上的误差衰减与**局部收敛阶**估计。
+
+- 上图：$\log_{10} |e_k|$ 随迭代步 $k$ 的变化
+- 下图：用公式
+  $$
+  p_k \;=\; \frac{\log(e_{k+1}/e_k)}{\log(e_k/e_{k-1})}
+  $$
+  估计**局部阶**，观察其趋向：二分 $\to 1$，割线 $\to 1.618$，牛顿 $\to 2$
+
+```{python}
+# | code-fold: true
+import numpy as np
+import matplotlib.pyplot as plt
+
+
+# 问题与真根
+def f(x):
+    return x**2 - 2.0
+
+
+def df(x):
+    return 2.0 * x
+
+
+def significance_floor(xstar, rtol=1e-15, atol=0.0):
+    """返回绘图/估计用的意义下限"""
+    return max(atol, rtol * max(1.0, abs(xstar)))
+
+
+xstar = np.sqrt(2.0)
+floor_plot = significance_floor(xstar, rtol=1e-15)  # ~1e-15
+floor_order = significance_floor(xstar, rtol=1e-14)  # ~1e-14
+
+
+# 三种方法的轨迹实现
+def trace_bisection(f, a, b, maxit=30):
+    """记录二分法中点序列，用于误差与收敛阶估计"""
+    fa, fb = f(a), f(b)
+    if fa * fb > 0:
+        raise ValueError("Bisection requires sign change on [a,b].")
+    xs = []
+    for _ in range(maxit):
+        c = 0.5 * (a + b)
+        xs.append(c)
+        fc = f(c)
+        if fa * fc <= 0:
+            b, fb = c, fc
+        else:
+            a, fa = c, fc
+    return xs
+
+
+def trace_newton(f, df, x0, maxit=12, xtol=1e-16):
+    """标准牛顿法"""
+    xs = [float(x0)]
+    for _ in range(maxit):
+        x = xs[-1]
+        dfx = df(x)
+        if dfx == 0.0 or not np.isfinite(dfx):
+            break
+        step = f(x) / dfx
+        if abs(f(x)) <= floor_plot:
+            break
+        x_new = x - step
+        xs.append(x_new)
+        if abs(x_new - x) <= xtol * (1 + abs(x_new)):
+            break
+    return xs
+
+
+def trace_secant(f, x0, x1, maxit=20, xtol=1e-16):
+    """割线法"""
+    xs = [float(x0), float(x1)]
+    for _ in range(maxit):
+        x_prev, x = xs[-2], xs[-1]
+        f_prev, fx = f(x_prev), f(x)
+        denom = fx - f_prev
+        if denom == 0.0 or not np.isfinite(denom):
+            break
+        step = fx * (x - x_prev) / denom
+        if step == 0.0:
+            break
+        x_new = x - step
+        xs.append(x_new)
+        if abs(x_new - x) <= xtol * (1 + abs(x_new)):
+            break
+    return xs
+
+
+# 局部收敛阶估计
+def estimate_order_sequence(xs, xstar, floor_order: float):
+    """
+    返回 p_k 序列，k=2..
+    """
+    errs = np.abs(np.asarray(xs) - xstar)
+    pks, ks = [], []
+    # 仅在 e_{k-1}, e_k, e_{k+1} 都正且可算时才估计
+    for k in range(2, len(errs) - 1):
+        ekm1, ek, ekp1 = errs[k - 1], errs[k], errs[k + 1]
+        if (ekm1 > floor_order) and (ek > floor_order) and (ekp1 > floor_order):
+            num = np.log(ekp1 / ek)
+            den = np.log(ek / ekm1)
+            if np.isfinite(num) and np.isfinite(den) and den != 0.0:
+                pks.append(num / den)
+                ks.append(k)  # 对应以 x_k 为中心的局部阶
+    return np.asarray(ks), np.asarray(pks), errs
+
+
+def tail_mean(x, m=5):
+    return np.mean(x[-m:]) if len(x) >= m else np.mean(x) if len(x) else np.nan
+
+
+def plot_safe_errors(errs: np.ndarray, floor: float) -> np.ndarray:
+    """绘图专用：去掉尾部 <= floor 的误差点，再裁到 floor，保证 log10 可用"""
+    idx = np.where(errs > floor)[0]
+    e = errs[:0] if len(idx) == 0 else errs[: idx[-1] + 1]
+    return np.clip(e, floor, None)
+
+
+# 生成轨迹
+xs_bi = trace_bisection(f, 1.0, 2.0, maxit=30)  # 线性收敛
+xs_nt = trace_newton(f, df, x0=1.5, maxit=12)  # 二阶收敛
+xs_sc = trace_secant(f, 1.0, 2.0, maxit=20)  # 超线性
+
+# 估计局部阶
+k_bi, p_bi, e_bi = estimate_order_sequence(xs_bi, xstar, floor_order)
+k_nt, p_nt, e_nt = estimate_order_sequence(xs_nt, xstar, floor_order)
+k_sc, p_sc, e_sc = estimate_order_sequence(xs_sc, xstar, floor_order)
+
+
+p_bi_hat = tail_mean(p_bi, m=5)
+p_nt_hat = tail_mean(p_nt, m=3)
+p_sc_hat = tail_mean(p_sc, m=5)
+
+print(f"bisect : steps={len(xs_bi):2d}, tail p ≈ {p_bi_hat:.3f}")
+print(f"newton : steps={len(xs_nt):2d}, tail p ≈ {p_nt_hat:.3f}")
+print(f"secant : steps={len(xs_sc):2d}, tail p ≈ {p_sc_hat:.3f}")
+
+# 绘图误差
+e_bi_plot = plot_safe_errors(np.abs(np.asarray(xs_bi) - xstar), floor_plot)
+e_nt_plot = plot_safe_errors(np.abs(np.asarray(xs_nt) - xstar), floor_plot)
+e_sc_plot = plot_safe_errors(np.abs(np.asarray(xs_sc) - xstar), floor_plot)
+
+# 可视化
+fig, axes = plt.subplots(2, 1, figsize=(6, 9))
+
+# 误差随迭代步衰减
+axes[0].plot(
+    np.arange(len(e_bi_plot)), np.log10(e_bi_plot), "-o", ms=4, label="Bisection"
+)
+axes[0].plot(np.arange(len(e_nt_plot)), np.log10(e_nt_plot), "-o", ms=4, label="Newton")
+axes[0].plot(np.arange(len(e_sc_plot)), np.log10(e_sc_plot), "-o", ms=4, label="Secant")
+axes[0].set_xlabel("iteration k")
+axes[0].set_ylabel(r"$\log_{10}|e_k|$")
+axes[0].set_title("Error decay (log-scale)")
+axes[0].grid(True, alpha=0.3)
+axes[0].legend()
+
+# 局部收敛阶 p_k
+axes[1].axhline(1.0, color="k", lw=1, ls=":", label="p=1 (linear)")
+axes[1].axhline((1 + 5**0.5) / 2, color="k", lw=1, ls="--", label="p≈1.618 (secant)")
+axes[1].axhline(2.0, color="k", lw=1, ls="-.", label="p=2 (Newton)")
+axes[1].plot(k_bi, p_bi, "-o", ms=4, label="Bisection p_k")
+axes[1].plot(k_nt, p_nt, "-o", ms=4, label="Newton p_k")
+axes[1].plot(k_sc, p_sc, "-o", ms=4, label="Secant p_k")
+axes[1].set_xlabel("iteration index k (for p_k)")
+axes[1].set_ylabel(r"local order $p_k$")
+axes[1].set_ylim(0.5, 2.4)
+axes[1].set_title("Estimated local order")
+axes[1].grid(True, alpha=0.3)
+axes[1].legend(loc="lower right", fontsize=9)
+
+plt.tight_layout()
+plt.show()
+```
+
+
+## 课后作业
+
+### a2-1（必做）：计算题
+
+设 $f(x)=\mathrm{e}^x-3x$，
+
+1. 写出牛顿迭代公式；
+2. 以 $x_0=0$ 迭代 5 次，给出 $|f(x_k)|$；
+3. 以二分法在 $[0,2]$ 上求根，比较迭代次数与误差。
+
+### a2-2（必做）：证明题
+
+在 $f'(x^*)\neq 0$、$f\in C^2$ 的条件下，证明牛顿法在 $x^*$ 邻域**二阶收敛**。
+
+> 提示：泰勒展开 + 误差递推
+
+### a2-3（选做）：编程实现**牛顿法变体**并验证
+
+* 变体难度相当，**任选1种**：
+  a) 带回溯线搜索的阻尼牛顿，用 $φ(x)=\displaystyle\frac{1}{2}f(x)^2$ 作下降准则
+  b) 牛顿–二分混合，维持 $[a,b]$ 变号区间，牛顿失败即回退至二分
+  c) 割线–牛顿混合：前 `k` 步割线，再切换牛顿
+  d) 中心差分近似导数 $f'$ 的牛顿，中心差分公式：
+  $$\mathrm{d}f(x) \approx \frac{f(x+h)-f(x-h)}{2h}$$
+
+* 要求统一 API、统一停止准则，统一求解 $f(x)=\cos x - x$ 在 $[0,1]$ 上的根作为测试
+* 形成带有理论分析、数值计算、性能分析的最终报告。
+* 代码模版：
+```{python}
+# ======统一数据结构区======
+from dataclasses import dataclass
+import time
+import math
+import numpy as np
+import matplotlib.pyplot as plt
+
+
+@dataclass
+class Stop:
+    """
+    定义求解器停止准则的统一数据结构。
+
+    该结构将所有控制算法终止的参数集中管理，
+    方便统一传递和修改。
+    """
+
+    xtol: float = 1e-12  # 步长的绝对容差 (absolute tolerance for x-step)。用于判断 |x_new - x_old| 是否足够小。
+    ftol: float = 1e-12  # 残差的容差 (function value/residual tolerance)。用于判断 |f(x)| 是否足够接近于零。
+    rtol: float = 1e-12  # 步长的相对容差 (relative tolerance for x-step)。与 xtol 结合使用，以适应不同数量级的根。
+    maxit: int = (
+        50  # 最大迭代次数 (maximum iterations)。防止算法因不收敛而无限循环的保险措施。
+    )
+
+
+@dataclass
+class Result:
+    """
+    定义求解器返回结果的统一数据结构。
+
+    该结构封装了求解过程的所有关键信息，
+    便于后续分析、绘图或报告。
+    """
+
+    root: float  # 计算得到的最终根的估计值。
+    iters: int  # 算法实际执行的迭代次数。
+    success: bool  # 布尔标志，True 表示算法成功收敛，False 表示未收敛或因其他原因失败。
+    status: str  # 描述算法终止具体原因的字符串，例如 "converged(step)", "maxit", "derivative_zero_or_nonfinite" 等。
+    history: list  # 按顺序记录了每次迭代产生的根的估计值 [x0, x1, x2, ...]。
+    f_calls: int  # 在整个求解过程中，目标函数 f(x) 被调用的总次数，是衡量算法效率的指标之一。
+    df_calls: int  # 在整个求解过程中，导数函数 f'(x) 被调用的总次数，对于需要导数的方法是关键的效率指标。
+    elapsed_sec: float  # 算法从开始到结束所消耗的时间，单位为秒。
+
+
+def step_stop(x_new, x_old, stop: Stop) -> bool:
+    return abs(x_new - x_old) <= max(stop.xtol, stop.rtol * abs(x_new))
+
+
+def res_stop(fx_new, stop: Stop) -> bool:
+    return abs(fx_new) <= stop.ftol
+
+
+def significance_floor(xstar, rtol=1e-15, atol=0.0) -> float:
+    return max(atol, rtol * max(1.0, abs(xstar)))
+
+
+def trim_trailing_small(errs: np.ndarray, floor: float) -> np.ndarray:
+    idx = np.where(errs > floor)[0]
+    if len(idx) == 0:
+        return errs[:0]
+    return errs[: idx[-1] + 1]
+
+
+def plot_safe_errors(errs: np.ndarray, floor: float) -> np.ndarray:
+    e = trim_trailing_small(errs, floor)
+    return np.clip(e, floor, None)
+
+
+def estimate_order_sequence(xs, xstar, floor_order: float = 1e-14):
+    """
+    返回 (k_indices, p_k, errs)，其中
+      p_k = log(e_{k+1}/e_k) / log(e_k/e_{k-1})
+    只在三元误差都大于 floor_order 时计算
+    """
+    errs = np.abs(np.asarray(xs, dtype=float) - xstar)
+    pks, ks = [], []
+    for k in range(2, len(errs) - 1):
+        ekm1, ek, ekp1 = errs[k - 1], errs[k], errs[k + 1]
+        if (ekm1 > floor_order) and (ek > floor_order) and (ekp1 > floor_order):
+            num = np.log(ekp1 / ek)
+            den = np.log(ek / ekm1)
+            if np.isfinite(num) and np.isfinite(den) and den != 0.0:
+                pks.append(num / den)
+                ks.append(k)
+    return np.asarray(ks), np.asarray(pks), errs
+
+
+def tail_mean(x, m=5):
+    return np.mean(x[-m:]) if len(x) >= m else (np.mean(x) if len(x) else np.nan)
+
+
+# ======数据结构区结束======
+
+
+# ======下面是作业实现======
+# 这里提供经典牛顿作为作业示例
+def newton_standard(f, df, x0, stop: Stop = Stop()):
+    """
+    经典牛顿法（Newton's method）
+    x_{k+1} = x_k - f(x_k) / f'(x_k)
+
+    参数
+    ----
+    f, df : callable
+        标量函数与其导数
+    x0 : float
+        初始值（需落在收敛域内）
+    stop : Stop
+        统一停止准则（xtol/rtol/ftol/maxit）
+
+    返回
+    ----
+    Result(root, iters, success, status, history, f_calls, df_calls, elapsed_sec)
+    """
+    t0 = time.perf_counter()
+    f_calls = 0
+    df_calls = 0
+
+    x = float(x0)
+    fx = f(x)
+    f_calls += 1
+    history = [x]
+
+    # 若一开始就满足残差阈值，直接返回
+    if res_stop(fx, stop):
+        t1 = time.perf_counter()
+        return Result(
+            x, 0, True, "init_converged(res)", history, f_calls, df_calls, t1 - t0
+        )
+
+    for k in range(1, stop.maxit + 1):
+        dfx = df(x)
+        df_calls += 1
+        if not np.isfinite(dfx) or dfx == 0.0:
+            t1 = time.perf_counter()
+            return Result(
+                x,
+                k - 1,
+                False,
+                "derivative_zero_or_nonfinite",
+                history,
+                f_calls,
+                df_calls,
+                t1 - t0,
+            )
+
+        # 经典牛顿步
+        step = fx / dfx
+        xn = x - step
+        fn = f(xn)
+        f_calls += 1
+
+        # 数值健壮性条件
+        if not np.isfinite(fn):
+            t1 = time.perf_counter()
+            return Result(
+                x,
+                k - 1,
+                False,
+                "f_nonfinite_after_step",
+                history,
+                f_calls,
+                df_calls,
+                t1 - t0,
+            )
+
+        x_old, x, fx = x, xn, fn
+        history.append(x)
+
+        # 实现两类停止：步长 & 残差
+        if step_stop(x, x_old, stop):
+            t1 = time.perf_counter()
+            return Result(
+                x, k, True, "converged(step)", history, f_calls, df_calls, t1 - t0
+            )
+        if res_stop(fx, stop):
+            t1 = time.perf_counter()
+            return Result(
+                x, k, True, "converged(res)", history, f_calls, df_calls, t1 - t0
+            )
+
+    # 达到迭代上限
+    t1 = time.perf_counter()
+    return Result(x, stop.maxit, False, "maxit", history, f_calls, df_calls, t1 - t0)
+
+
+# ======以下是测试======
+
+# 示例：f(x)=cos x - x
+f1 = lambda x: math.cos(x) - x
+df1 = lambda x: -math.sin(x) - 1.0
+res1 = newton_standard(f1, df1, x0=0.5, stop=Stop())
+print("cosx-x:", res1)
+
+# 可视化略
+
+# 误差衰减示意
+xstar1 = 0.73908513321516064166  # 真实值
+errs1 = np.abs(np.array(res1.history) - xstar1)
+print("last |f|:", abs(f1(res1.root)), " last |e|:", errs1[-1])
+```
+
+
+## JAX 附录：可微与可编译循环
+
+* **开启 64-bit**：`jax.config.update("jax_enable_x64", True)`
+* `grad` 自动微分、`lax.while_loop` 可编译的循环、`vmap` 批量初值并行
+* 说明：本课程仅涉及 **CPU 版 JAX**
+
+### JAX 牛顿
+
+```{python}
+import jax, jax.numpy as jnp
+from jax import grad, jit, vmap, lax
+
+jax.config.update("jax_enable_x64", True)
+
+
+def newton_jax(f, x0, xtol=1e-12, ftol=1e-12, maxit=50):
+    df = grad(f)
+
+    def cond(state):
+        x, x_prev, k = state
+        step_ok = jnp.abs(x - x_prev) > xtol * (1 + jnp.abs(x))
+        res_ok = jnp.abs(f(x)) > ftol
+        return (k < maxit) & (step_ok | res_ok)
+
+    def body(state):
+        x, x_prev, k = state
+        g = df(x)
+        # 防护：导数过小则不再移动
+        step = jnp.where(jnp.abs(g) > 1e-30, f(x) / g, 0.0)
+        xn = x - step
+        return (xn, x, k + 1)
+
+    x0 = jnp.asarray(x0)
+    x, _, k = lax.while_loop(cond, body, (x0, x0 + 10 * xtol, 0))
+    return x, k
+
+
+# 示例
+f = lambda x: jnp.cos(x) - x
+x, it = newton_jax(f, 0.5)
+x, it
+```
+
+### `vmap` 批量初值 & 收敛次数图
+
+观察不同初值的**收敛速度**不同。有些区域可能迭代上限触顶
+
+```{python}
+# 在一批初值上并行跑牛顿，观察收敛迭代次数
+xs0 = jnp.linspace(-1.0, 1.0, 401)
+sol = vmap(lambda x0: newton_jax(f, x0))(xs0)
+roots, iters = sol
+
+# 可视化
+import numpy as np
+import matplotlib.pyplot as plt
+
+iters_np = np.asarray(iters)
+plt.figure(figsize=(8, 2))
+plt.imshow(iters_np[None, :], aspect="auto", extent=[xs0[0], xs0[-1], 0, 1])
+plt.yticks([])
+plt.xlabel("initial guess x0")
+plt.title("Newton iterations across initial guesses")
+plt.colorbar(label="#iterations")
+plt.show()
+```
