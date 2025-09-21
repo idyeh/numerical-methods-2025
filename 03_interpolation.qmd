@@ -1,0 +1,1159 @@
+---
+title: "插值与近似"
+---
+
+## 学习目标
+
+* 掌握**多项式插值**的三种经典表述：**拉格朗日型**、**牛顿型**、**重心公式**；理解它们在数值稳定性与代价上的区别。
+* 认识**节点选择**的重要性，能用**切比雪夫（Chebyshev）节点**缓解龙格（Runge）现象。
+* 理解并实现**三次样条插值**，比较其与高次多项式插值的稳定性与效果。
+* 具备**工程化**的实现能力：统一 API、单元自检、可视化误差与复杂度。
+
+## 背景
+- 当我们只在若干**离散点**上有数据或模型输出，但需要在这些点之间“填空”或平滑逼近时，就需要插值或近似。
+- 典型行业应用  
+  - **汽车/电池工程**：电池**开路电压（OCV）** 与荷电状态 **SoC** 的标定曲线（BMS 估算 SoC、热管理）；发动机/电机的**扭矩–转速**查表控制。  
+  - **金融**：**收益率曲线**与远期率从离散期限的债券/掉期报价**内插**到任意期限，用于定价与风险管理。  
+  - **航空航天/气象/地学**：格点场（风场、温度场、地形高程）的**空间内插**与重采样。  
+  - **计算机图形/信号处理**：图像缩放的双线性/双三次插值，音频**重采样**。  
+  - **实验科学/材料**：**标定曲线**（激光器电流–功率、材料应变–应力的弹性段）与数据清洗/反演。
+
+
+## 动机
+
+* **数据拟合与近似**：实验数据点 $(x_i,y_i)$ 的**光滑逼近**、数值微分/积分的内插、函数逼近的低阶局部模型。
+* **数值代数**：构造求积公式（Newton–Cotes、Gauss 类）时的插值思想。
+
+> 主线：**插值多项式阶数越高并不意味着更好**
+
+
+## 拉格朗日（Lagrange）型
+
+给定离散的**互异节点** $x_0,\dots,x_n$，数据 $y_i=f(x_i)$，存在唯一的**至多 $n$ 次**多项式 $p_n$ 使 $p_n(x_i)=y_i$。
+
+构造基函数 $\ell_i(x)$ 使 $\ell_i(x_j)=\delta_{ij}$。对互异节点 $x_0,\dots,x_n$，定义
+$$
+\ell_i(x)=\prod_{\substack{j=0 \\ j\ne i}}^{n}\frac{x-x_j}{x_i-x_j}.
+$$
+
+显然 $\ell_i(x_j)=0$（$j\ne i$）且 $\ell_i(x_i)=1$。令
+$$
+p_n(x)=\sum_{i=0}^{n} y_i\,\ell_i(x),
+$$
+
+则 $p_n(x_k)=\sum_i y_i\,\ell_i(x_k)=y_k$。因“至多 $n$ 次多项式插值”的**唯一性**（维数或范德蒙德可逆性），该 $p_n$ 即为所求。
+
+::: callout-note
+直观、一次成型。但**直接计算**在数值上不稳（大量乘除）且**每次求值 $O(n^2)$**。
+:::
+
+### 误差项
+
+
+若 $f\in C^{n+1}$，误差公式表示为：
+
+  $$
+  f(x)-p_n(x)=\frac{f^{(n+1)}(\xi_x)}{(n+1)!}\,\omega_{n+1}(x),\qquad
+  \omega_{n+1}(x)=\prod_{i=0}^{n}(x-x_i).
+  $$
+
+$\omega_{n+1}$ 的振幅控制说明**节点分布**对误差很重要。
+
+### 拉格朗日的直接实现
+
+```{python}
+import numpy as np
+
+
+def lagrange_eval(x_nodes, y_nodes, x):
+    x_nodes = np.asarray(x_nodes, dtype=np.float64)
+    y_nodes = np.asarray(y_nodes, dtype=np.float64)
+    x = np.atleast_1d(np.asarray(x, dtype=np.float64))
+    n = len(x_nodes) - 1
+    out = np.zeros_like(x)
+    for i in range(n + 1):
+        # 计算 ℓ_i(x)
+        li = np.ones_like(x)
+        for j in range(n + 1):
+            if j == i:
+                continue
+            li *= (x - x_nodes[j]) / (x_nodes[i] - x_nodes[j])
+        out += y_nodes[i] * li
+    return out if out.ndim else out.item()
+```
+
+::: callout-caution
+不推荐生产使用
+:::
+
+## 牛顿（Newton）型
+
+**构造思路**：逐点“增量”扩展。设
+$$
+p_k(x)=c_0 + c_1(x-x_0)+\cdots+c_k\prod_{j=0}^{k-1}(x-x_j).
+$$
+
+令 $p_k$ 同时通过 $x_0,\dots,x_k$。当新增 $x_k$ 时，
+$$
+p_k(x_k)-p_{k-1}(x_k)=c_k\prod_{j=0}^{k-1}(x_k-x_j).
+$$
+
+左边等于 $y_k-p_{k-1}(x_k)$。故
+$$
+c_k=\frac{y_k-p_{k-1}(x_k)}{\prod_{j=0}^{k-1}(x_k-x_j)}.
+$$
+
+把右端写成**差商**（divided differences）记号，得到递推表：
+$$
+c_0=f[x_0]=y_0,\quad
+c_1=f[x_0,x_1]=\frac{y_1-y_0}{x_1-x_0},\quad
+c_2=f[x_0,x_1,x_2]=\frac{f[x_1,x_2]-f[x_0,x_1]}{x_2-x_0},\ \dots
+$$
+
+最终
+$$
+p_n(x)=c_0 + c_1(x-x_0)+ c_2(x-x_0)(x-x_1)+\cdots + c_n\prod_{j=0}^{n-1}(x-x_j)=\sum_{k=0}^{n} f[x_0,\dots,x_k]\;\prod_{j=0}^{k-1}(x-x_j),
+$$
+
+其中 $c_k=f[x_0,\dots,x_k]$。
+
+并可用**Horner 样式**自右向左嵌套求值，复杂度 $O(n)$。
+
+::: callout-note
+秦九韶-霍纳（Horner）方法是一种通过将多项式重写为一系列嵌套的线性表达式来高效地求出给定值处多项式值的算法。
+:::
+
+### 差商表
+
+| $x_i$ | $f[x_i]=y_i$ | $f[x_i,x_{i+1}]=\frac{f[x_{i+1}]-f[x_i]}{x_{i+1}-x_i}$ | $f[x_i,x_{i+1},x_{i+2}]=\frac{f[x_{i+1},x_{i+2}]-f[x_i,x_{i+1}]}{x_{i+2}-x_i}$ | $f[x_i,\dots,x_{i+k}]=\frac{f[x_{i+1},\dots,x_{i+k}]-f[x_i,\dots,x_{i+k-1}]}{x_{i+k}-x_i}$ |
+|-------|--------------|--------------------------------------------------------|---------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------|
+| $x_0$ | $y_0$ | | | |
+| $x_1$ | $y_1$ | $f[x_0,x_1]$ | | |
+| $x_2$ | $y_2$ | $f[x_1,x_2]$ | $f[x_0,x_1,x_2]$ | |
+| $x_3$ | $y_3$ | $f[x_2,x_3]$ | $f[x_1,x_2,x_3]$ | $f[x_0,x_1,x_2,x_3]$ |
+| $\vdots$ | $\vdots$ | $\vdots$ | $\vdots$ | $\ddots$ |
+
+示例：假设我们有一组数据点 $(0, 1)$, $(1, 3)$, $(2, 2)$, $(4, 5)$
+
+| $x_i$ | $f[x_i]$ | $f[x_i,x_{i+1}]$ | $f[x_i,x_{i+1},x_{i+2}]$ | $f[x_i,x_{i+1},x_{i+2},x_{i+3}]$ |
+|-------|----------|------------------|--------------------------|----------------------------------|
+| 0 | 1 | | | |
+| 1 | 3 | $\frac{3-1}{1-0}=2$ | | |
+| 2 | 2 | $\frac{2-3}{2-1}=-1$ | $\frac{-1-2}{2-0}=-\frac{3}{2}$ | |
+| 4 | 5 | $\frac{5-2}{4-2}=\frac{3}{2}$ | $\frac{\frac{3}{2}-(-1)}{4-1}=\frac{5}{6}$ | $\frac{\frac{5}{6}-(-\frac{3}{2})}{4-0}=\frac{7}{12}$ |
+
+对角线元素（每行右上角的条目）是牛顿除差插值公式中使用的系数。
+
+::: callout-note
+增量更新方便，添加新节点仅多一列差商。
+:::
+
+### 牛顿法的实现
+
+```{python}
+import numpy as np
+
+def divided_differences(x_nodes, y_nodes):
+    x = np.asarray(x_nodes, dtype=np.float64)
+    coef = np.asarray(y_nodes, dtype=np.float64).copy()
+    n = len(x)
+    for k in range(1, n):
+        coef[k:n] = (coef[k:n] - coef[k-1:n-1]) / (x[k:n] - x[:n-k])
+    return coef  # c0..c_{n-1}
+
+def newton_eval(x_nodes, coef, x):
+    x_nodes = np.asarray(x_nodes, dtype=np.float64)
+    coef = np.asarray(coef, dtype=np.float64)
+    x = np.atleast_1d(np.asarray(x, dtype=np.float64))
+    n = len(coef)
+    p = np.zeros_like(x) + coef[-1]
+    for k in range(n-2, -1, -1):
+        p = coef[k] + (x - x_nodes[k]) * p
+    return p if p.ndim else p.item()
+```
+
+## 重心公式推导
+从拉格朗日形式起步。把 $\ell_i(x)$ 重写为
+
+$$
+\ell_i(x)=\frac{\prod_{j\ne i}(x-x_j)}{\prod_{j\ne i}(x_i-x_j)}
+=\frac{\prod_{j=0}^{n}(x-x_j)}{x-x_i}\cdot
+\underbrace{\frac{1}{\prod_{j\ne i}(x_i-x_j)}}_{w_i}
+$$
+
+记 $w_i:=\bigl(\prod_{j\ne i}(x_i-x_j)\bigr)^{-1}$。于是
+$$
+p_n(x)=\sum_{i=0}^{n} y_i\,\ell_i(x)
+=\Bigl(\prod_{j=0}^{n}(x-x_j)\Bigr)\sum_{i=0}^{n}\frac{w_i\,y_i}{x-x_i}
+$$
+
+注意到 $\sum_{i}\ell_i(x)\equiv 1$ 同理可得
+$$
+1=\Bigl(\prod_{j=0}^{n}(x-x_j)\Bigr)\sum_{i=0}^{n}\frac{w_i}{x-x_i}.
+$$
+
+两式相除，得到**重心（barycentric）公式**：
+$$
+\boxed{\,p_n(x)=\frac{\displaystyle \sum_{i=0}^n \frac{w_i\,y_i}{x-x_i}}
+{\displaystyle \sum_{i=0}^n \frac{w_i}{x-x_i}}\,}.
+$$
+
+若 $x=x_k$ 时，分子分母同时出现奇点，但极限为 $y_k$，实现上**直接返回 $y_k$** 即可。
+
+## 重心插值的数值稳定性
+
+* **第一重心公式**：
+
+  $$
+  p_n(x)=\frac{\sum_{i=0}^n \displaystyle \frac{w_i\,y_i}{x-x_i}}
+               {\sum_{i=0}^n \displaystyle \frac{w_i}{x-x_i}},\qquad
+  w_i=\frac{1}{\prod_{j\ne i}(x_i-x_j)}
+  $$
+
+* **第二重心公式**：对某些节点（如切比雪夫）选择**简洁权重**，数值更稳定。
+* **要点**：
+
+  * 若 $x$ 恰等于某个 $x_k$，直接返回 $y_k$（避免 0/0）。
+  * 预计算权重 $w_i$ 的**代价 $O(n^2)$**，单点求值 $O(n)$。
+
+### 重心法的实现
+
+```{python}
+import numpy as np
+
+def barycentric_weights(x_nodes):
+    x = np.asarray(x_nodes, dtype=np.float64)
+    n = len(x)
+    w = np.ones(n, dtype=np.float64)
+    for j in range(n):
+        w[j] = 1.0/np.prod(x[j] - np.delete(x, j))
+    return w
+
+def barycentric_eval(x_nodes, y_nodes, x, w=None):
+    x_nodes = np.asarray(x_nodes, dtype=np.float64)
+    y_nodes = np.asarray(y_nodes, dtype=np.float64)
+    if w is None:
+        w = barycentric_weights(x_nodes)
+    w = np.asarray(w, dtype=np.float64)
+    x = np.atleast_1d(np.asarray(x, dtype=np.float64))
+
+    out = np.empty_like(x)
+    for k, xv in enumerate(x):
+        diff = xv - x_nodes
+        idx = np.where(diff == 0)[0]
+        if len(idx) > 0:
+            out[k] = y_nodes[idx[0]]
+        else:
+            num = np.sum(w * y_nodes / diff)
+            den = np.sum(w / diff)
+            out[k] = num/den
+    return out if out.ndim else out.item()
+```
+
+
+## 方法对比
+
+**示例数据**
+
+电池开路电压 **OCV** 与荷电状态 **SoC** 的标定曲线。
+ 
+- 自变量：$\text{SoC}\in[0,1]$  
+- 因变量：$\text{OCV}$（单位：V）  
+- 特征：整体单调、在中段略 S 形，适合用来测试插值与样条。
+
+**数据表**
+
+| idx | SoC $x_i$ | OCV $y_i$ (V) |
+|---:|:-----------:|:----------------:|
+| 0  | 0.00 | 3.000 |
+| 1  | 0.10 | 3.130 |
+| 2  | 0.20 | 3.255 |
+| 3  | 0.30 | 3.380 |
+| 4  | 0.40 | 3.505 |
+| 5  | 0.50 | 3.635 |
+| 6  | 0.60 | 3.780 |
+| 7  | 0.70 | 3.935 |
+| 8  | 0.80 | 4.075 |
+| 9  | 0.90 | 4.170 |
+| 10 | 1.00 | 4.240 |
+
+### 代码：载入数据并用三种插值法对比
+```{python}
+import numpy as np
+import matplotlib.pyplot as plt
+
+plt.rcParams["font.sans-serif"] = ["PingFang SC", "Arial Unicode MS"]
+plt.rcParams["axes.unicode_minus"] = False
+
+# 节点
+x_nodes = np.linspace(0.0, 1.0, 11, dtype=np.float64)
+y_nodes = np.array(
+    [3.000, 3.130, 3.255, 3.380, 3.505, 3.635, 3.780, 3.935, 4.075, 4.170, 4.240],
+    dtype=np.float64,
+)
+
+# 求值点
+xs = np.linspace(0, 1, 801, dtype=np.float64)
+
+
+# 计算
+w = barycentric_weights(x_nodes)
+y_bary = barycentric_eval(x_nodes, y_nodes, xs, w)
+coef = divided_differences(x_nodes, y_nodes)
+y_newt = newton_eval(x_nodes, coef, xs)
+y_lagr = lagrange_eval(x_nodes, y_nodes, xs)
+
+plt.figure(figsize=(6, 4))
+plt.plot(xs, y_bary, "-", label="Barycentric")
+plt.plot(xs, y_newt, "--", label="Newton (Horner)")
+plt.plot(xs, y_lagr, ":", label="Lagrange (direct)")
+plt.plot(x_nodes, y_nodes, "o", label="nodes")
+plt.xlabel("SoC")
+plt.ylabel("OCV (V)")
+plt.title("示例数据的三种插值对比")
+plt.grid(True, alpha=0.3)
+plt.legend()
+plt.tight_layout()
+plt.show()
+```
+
+## 节点选择
+
+- **等距节点**在区间端点附近“太稀疏”，导致插值基函数幅度巨大，插值误差与数值误差都被严重放大，这在高阶时表现为 **Runge 现象**，即端点振荡。
+- **切比雪夫（Chebyshev）节点**把点密集地“压”在两端（$[-1,1]$ 上的密度 $\rho(x)=\dfrac{1}{\pi\sqrt{1-x^2}}$），能显著降低最大插值误差与**Lebesgue 常数** $\Lambda_n$ 的增长速度，约为对数级。
+
+
+### Chebyshev 插值节点
+
+- **Chebyshev 多项式**  
+
+  1) 一类 $T_k(x)=\cos(k\arccos x)$；
+  2) 二类 $U_k(x)=\dfrac{\sin((k+1)\arccos x)}{\sin(\arccos x)}$。
+- **两种常用“Chebyshev 插值节点”**都定义在 $[-1,1]$：
+  1) **一类节点不含端点**  
+     $$
+     x_j=\cos\frac{(2j+1)\pi}{2(n+1)},\quad j=0,\dots,n.
+     $$
+     它们是 $T_{n+1}(x)$ 的**零点**，常见于“Gauss 型”设置（不含端点）。
+  2) **二类节点含端点**  
+     $$
+     x_j=\cos\frac{j\pi}{n},\quad j=0,\dots,n.
+     $$
+
+     这些是 $T_n(x)$ 的**极值点**（端点 $\pm1$ 含在内），又常被称为**Chebyshev–Lobatto** 节点。
+
+::: callout-tip
+**工程建议**：做全局多项式插值时，**优先用二类节点**，便于与边界条件衔接；若确需避开端点，可用一类节点。
+:::
+
+
+### 切比雪夫节点性质
+1) **$\omega_{n+1}$ 振幅最小化**  
+   在 $[-1,1]$ 上，取“一类切比雪夫零点”时，有  
+   $$
+   \omega_{n+1}(x)=\prod_{j=0}^{n}(x-x_j)=2^{-n}T_{n+1}(x),
+   $$
+
+   而 $|T_{n+1}(x)|\le 1$。这解释了为何端点不会出现如等距那样的爆炸振荡。
+2) **Lebesgue 常数 $\Lambda_n$ 仅对数增长**  
+   对切比雪夫节点，$\Lambda_n\sim \tfrac{2}{\pi}\log n + O(1)$；等距节点的 $\Lambda_n$ 增长更快，常常“失控”，引发振荡。
+
+## 误差与 Lebesgue 常数
+
+我们知道，插值误差可写为
+
+  $$
+  f(x)-p_n(x) = \frac{f^{(n+1)}(\xi_x)}{(n+1)!}\,\omega_{n+1}(x),
+  $$
+
+
+但实际数值误差还放大为 **Lebesgue 常数** $\Lambda_n$：
+
+  $$
+  \|f-p_n\|_\infty \le (1+\Lambda_n)\inf_{q\in\Pi_n}\|f-q\|_\infty.
+  $$
+
+::: callout-tip
+工程建议：优先选切比雪夫（或其仿射）节点。
+:::
+
+
+### 区间映射
+
+从 $[-1,1]$ 到任意 $[a,b]$ 的映射采用如下方法：
+$$
+x_j^{[a,b]}=\frac{a+b}{2}+\frac{b-a}{2}\,x_j^{[-1,1]},
+$$
+
+其中 $x_j^{[-1,1]}$ 取一类或二类切比雪夫节点即可。
+
+
+### 重心插值的“第二公式权重”与实现要点
+- 二类节点的**闭式权重**，幅度有界、交替符号：
+  $$
+  w_j=
+  \begin{cases}
+  \tfrac12(-1)^j, & j=0\ \text{或}\ j=n,\\
+  (-1)^j, & \text{否则}.
+  \end{cases}
+  $$
+
+  用它代入重心公式
+  $$
+  p_n(x)=\frac{\sum\limits_{j=0}^n \dfrac{w_j\,y_j}{x-x_j}}
+               {\sum\limits_{j=0}^n \dfrac{w_j}{x-x_j}},
+  $$
+
+  **更具数值稳定性**，且无需再做 $O(n^2)$ 的通用权重预处理。
+- 一类节点的闭式权重也很简洁：$w_j = (-1)^j$，所有点同模长。  
+- 若 $x$ 与某个 $x_k$**恰等**，直接返回 $y_k$（避免 0/0）。批量求值时可先做相等掩码。
+
+
+### 比较实验
+
+比较等距节点与切比雪夫二类节点的节点密度与勒贝格（Lebesgue）函数
+```{python}
+# | code-fold: true
+import numpy as np
+import matplotlib.pyplot as plt
+
+
+def nodes_equidistant(a, b, n):
+    j = np.arange(n + 1, dtype=np.float64)
+    return a + (b - a) * j / n
+
+
+def nodes_chebyshev_lobatto(a, b, n):
+    j = np.arange(n + 1, dtype=np.float64)
+    xi = np.cos(np.pi * j / n)  # [-1,1]
+    return (a + b) / 2 + (b - a) / 2 * xi
+
+
+def lebesgue_function(x_nodes, x_eval):
+    """用重心基函数稳定计算勒贝格函数 Λ_n(x)=sum_i |ℓ_i(x)|."""
+    x = np.asarray(x_nodes, dtype=np.float64)
+    xe = np.asarray(x_eval, dtype=np.float64)
+    n = len(x) - 1
+    # 选“Lobatto”闭式权重；若改用等距节点，可退回通用权重（O(n^2)）
+    # 这里为了公平比较而统一用通用权重
+    w = np.ones_like(x)
+    for j in range(n + 1):
+        w[j] = 1.0 / np.prod(x[j] - np.delete(x, j))
+
+    L = np.empty_like(xe)
+    for k, xv in enumerate(xe):
+        diff = xv - x
+        if np.any(diff == 0):
+            L[k] = 1.0  # 在节点处 ℓ_k=1 其余为 0，Lebesgue 函数取 1
+        else:
+            denom = np.sum(w / diff)
+            phi = (w / diff) / denom  # 重心下的 ℓ_i(x)
+            L[k] = np.sum(np.abs(phi))  # Lebesgue 函数
+    return L
+
+
+n = 16
+xeq = nodes_equidistant(-1, 1, n)
+xch = nodes_chebyshev_lobatto(-1, 1, n)
+xx = np.linspace(-1, 1, 2001)
+
+L_eq = lebesgue_function(xeq, xx)
+L_ch = lebesgue_function(xch, xx)
+
+fig, ax = plt.subplots(2, 1, figsize=(6, 7))
+# 节点分布
+ax[0].plot(xeq, 0 * xeq, "o", label="等距")
+ax[0].plot(xch, 0 * xch + 0.05, "x", label="切比雪夫")
+ax[0].set_title("节点分布")
+ax[0].set_yticks([])
+ax[0].grid(True, alpha=0.3)
+ax[0].legend()
+
+# Lebesgue 函数
+ax[1].plot(xx, L_eq, label="等距 Lebesgue")
+ax[1].plot(xx, L_ch, label="切比雪夫 Lebesgue")
+ax[1].set_title("Lebesgue 函数对比（n=16）")
+ax[1].set_xlabel("x")
+ax[1].set_ylabel(r"$\Lambda_n(x)$")
+ax[1].grid(True, alpha=0.3)
+ax[1].legend()
+plt.tight_layout()
+plt.show()
+```
+
+
+## Runge 现象：示例与对比
+
+* 经典函数：
+
+  $$
+  f(x)=\frac{1}{1+25x^2},\qquad x\in[-1,1].
+  $$
+
+
+### 可视化
+
+通过不同阶数、两种节点的插值，观察**等距节点**的高次多项式在区间端点出现巨振荡，而**切比雪夫节点**显著更稳
+
+```{python}
+# | code-fold: true
+import numpy as np
+import matplotlib.pyplot as plt
+
+plt.rcParams["font.sans-serif"] = ["PingFang SC", "Arial Unicode MS"]
+plt.rcParams["axes.unicode_minus"] = False
+
+
+def runge(x):
+    return 1.0 / (1.0 + 25.0 * x * x)
+
+
+def interp_bary(x_nodes, fvals, x_eval, w=None):
+    return barycentric_eval(x_nodes, fvals, x_eval, w)
+
+
+def bary_weights_cheb_lobatto(n):
+    j = np.arange(n + 1)
+    w = np.where((j == 0) | (j == n), 0.5, 1.0) * ((-1.0) ** j)
+    return w.astype(np.float64)
+
+
+xs = np.linspace(-1, 1, 2001)
+orders = [4, 8, 12, 16]
+
+fig, axes = plt.subplots(len(orders), 2, figsize=(10, 10), sharex=True, sharey=True)
+for r, n in enumerate(orders):
+    # 等距
+    xe = nodes_equidistant(-1, 1, n)
+    ye = runge(xe)
+    ye_hat = interp_bary(xe, ye, xs)  # 通用权重
+    axes[r, 0].plot(xs, runge(xs), "k-", lw=1, label="f(x)")
+    axes[r, 0].plot(xs, ye_hat, "-", lw=1.2, label=f"poly (n={n})")
+    axes[r, 0].plot(xe, ye, "o", ms=3)
+    axes[r, 0].set_title(f"等距节点 n={n}")
+
+    # 切比雪夫（Lobatto）
+    xc = nodes_chebyshev_lobatto(-1, 1, n)
+    yc = runge(xc)
+    wc = bary_weights_cheb_lobatto(n)
+    yc_hat = interp_bary(xc, yc, xs, w=wc)  # 重心第二公式权重
+    axes[r, 1].plot(xs, runge(xs), "k-", lw=1, label="f(x)")
+    axes[r, 1].plot(xs, yc_hat, "-", lw=1.2, label=f"poly (n={n})")
+    axes[r, 1].plot(xc, yc, "o", ms=3)
+    axes[r, 1].set_title(f"切比雪夫节点 n={n}")
+
+for ax in axes.flat:
+    ax.grid(True, alpha=0.3)
+axes[-1, 0].set_xlabel("x")
+axes[-1, 1].set_xlabel("x")
+axes[0, 0].legend(loc="lower center", ncol=2, fontsize=9)
+fig.suptitle("Runge 现象", y=0.99)
+plt.tight_layout()
+plt.show()
+```
+
+
+## 分段插值
+
+全局高次多项式在端点易发散，为了**缓解 Runge 振荡**，可以选择在每个小区间内仅用三次多项式，整体 $C^2$ 光滑，稳定边界。这是一种**分段插值**。
+
+用分段插值更新方便，**只改动一小段数据**，影响局限在邻近区间。而全局多项式会“牵一发而动全身”。
+
+当节点较多、需要稳定可控的全区间插值时，分段**三次样条**（cubic spline）是更好的默认选择。
+
+## 三次样条插值
+
+给定严格单调的节点
+$$
+x_0<x_1<\cdots<x_n,\qquad y_i=f(x_i),
+$$
+
+在每个区间 $[x_i,x_{i+1}]$ 上构造三次多项式 $S_i(x)$，拼接成
+$$
+S(x)=S_i(x),\quad x\in[x_i,x_{i+1}],
+$$
+
+使得：
+
+1) **插值条件**：$S(x_i)=y_i$（全体端点匹配）；  
+2) **一阶连续**：$S_i'(x_{i+1})=S_{i+1}'(x_{i+1})$（所有内节点光滑）；  
+3) **二阶连续**：$S_i''(x_{i+1})=S_{i+1}''(x_{i+1})$（曲率连续）；  
+4) **自然边界**：$S''(x_0)=S''(x_n)=0$。
+
+记
+$$
+h_i:=x_{i+1}-x_i>0,\qquad m_i:=S''(x_i),\quad i=0,\dots,n.
+$$
+
+在每个区间 $[x_i,x_{i+1}]$ 上，三次多项式的二阶导 $S_i''$ 是**一次函数**。用端点值线性插值：
+$$
+S_i''(x)=(1-t)\,m_i+t\,m_{i+1},\qquad t:=\frac{x-x_i}{h_i}\in[0,1].
+$$
+
+对 $x$ 积分一次得一阶导，积分常数记为 $A_i$：
+$$
+\begin{aligned}
+S_i'(x)
+&=\int S_i''(x)\,dx
+= \int\Bigl(m_i + (m_{i+1}-m_i)\frac{x-x_i}{h_i}\Bigr)\,dx + A_i \\
+&= m_i(x-x_i)+\frac{m_{i+1}-m_i}{2h_i}(x-x_i)^2 + A_i.
+\end{aligned}
+$$
+
+再积分一次得 $S_i(x)$（积分常数记为 $B_i$）：
+$$
+S_i(x)
+= \frac{m_i}{2}(x-x_i)^2 + \frac{m_{i+1}-m_i}{6h_i}(x-x_i)^3 + A_i(x-x_i)+B_i.
+$$
+
+用**端点插值条件**确定 $A_i,B_i$：
+
+- 令 $x=x_i$，得 $S_i(x_i)=B_i=y_i\Rightarrow B_i=y_i$；
+- 令 $x=x_{i+1}\Rightarrow x-x_i=h_i$，代入得到
+  $$
+  y_{i+1}
+  = \frac{m_i}{2}h_i^2 + \frac{m_{i+1}-m_i}{6h_i}h_i^3 + A_i h_i + y_i
+  = y_i + \frac{h_i^2}{6}(2m_i+m_{i+1}) + A_i h_i,
+  $$
+
+  从而
+  $$
+  A_i=\frac{y_{i+1}-y_i}{h_i} - \frac{h_i}{6}(2m_i+m_{i+1}).
+  $$
+
+把 $A_i,B_i$ 代回 $S_i(x)$，并把 $(x-x_i)$、$(x_{i+1}-x)$ 对称化，可得**经典样条显式式**：
+$$
+\boxed{\
+\begin{aligned}
+S_i(x)
+&= \frac{m_i\,(x_{i+1}-x)^3}{6h_i}
+ + \frac{m_{i+1}\,(x-x_i)^3}{6h_i} \\
+&\quad + \Bigl(y_i-\frac{m_i h_i^2}{6}\Bigr)\frac{x_{i+1}-x}{h_i}
+ + \Bigl(y_{i+1}-\frac{m_{i+1} h_i^2}{6}\Bigr)\frac{x-x_i}{h_i},
+\qquad x\in[x_i,x_{i+1}].
+\end{aligned}}
+$$
+
+该式表明：**只要知道 $m_i$ 序列，就能对整条样条求值**。
+
+## 建立三对角方程
+
+由上式求两端一阶导（$x\to x_i^+$ 与 $x\to x_{i+1}^-$）：
+$$
+\begin{aligned}
+S_i'(x_i^+) &= \frac{y_{i+1}-y_i}{h_i} - \frac{h_i}{6}(2m_i+m_{i+1}),\\
+S_i'(x_{i+1}^-) &= \frac{y_{i+1}-y_i}{h_i} + \frac{h_i}{6}(m_i+2m_{i+1}).
+\end{aligned}
+$$
+
+对内节点 $x_i$（$i=1,\dots,n-1$）应用**一阶连续性**条件：
+$$
+S_{i-1}'(x_i^-)=S_i'(x_i^+).
+$$
+
+把上式两端点导数代入并整理，得到关于 $\{m_i\}$ 的**三对角线性系统**：
+$$
+\boxed{\
+h_{i-1} m_{i-1} + 2(h_{i-1}+h_i) m_i + h_i m_{i+1}
+= 6\!\left(\frac{y_{i+1}-y_i}{h_i} - \frac{y_i-y_{i-1}}{h_{i-1}}\right),
+\quad i=1,\dots,n-1.}
+$$
+
+再配上**自然边界** $m_0=0,\ m_n=0$，即可唯一解出 $m$。
+
+::: callout-note
+三对角矩阵对称、其内部行严格对角占优，因此可用 **Thomas 算法**（追赶法）在线性时间 $O(n)$ 稳定求解。
+:::
+
+
+### 求解 $m$
+
+```{python}
+# | code-fold: true
+import numpy as np
+
+
+def natural_cubic_spline(x_nodes, y_nodes):
+    x = np.asarray(x_nodes, dtype=np.float64)
+    y = np.asarray(y_nodes, dtype=np.float64)
+    n = len(x) - 1
+    h = np.diff(x)  # h_i = x_{i+1}-x_i
+    assert np.all(h > 0), "x_nodes must be strictly increasing"
+
+    # 组装三对角矩阵 A 与右端 b，用于解 m=S''(x_i)
+    A = np.zeros((n + 1, n + 1), dtype=np.float64)
+    b = np.zeros(n + 1, dtype=np.float64)
+
+    # 自然边界
+    A[0, 0] = 1.0
+    A[n, n] = 1.0
+    b[0] = 0.0
+    b[n] = 0.0
+
+    # 内点方程
+    for i in range(1, n):
+        A[i, i - 1] = h[i - 1]
+        A[i, i] = 2.0 * (h[i - 1] + h[i])
+        A[i, i + 1] = h[i]
+        b[i] = 6.0 * ((y[i + 1] - y[i]) / h[i] - (y[i] - y[i - 1]) / h[i - 1])
+
+    m = np.linalg.solve(A, b)  # m_0..m_n
+    return (x, y, m)
+
+
+def spline_eval(spline, x_eval):
+    x, y, m = spline
+    x_eval = np.atleast_1d(np.asarray(x_eval, dtype=np.float64))
+    n = len(x) - 1
+    # 每个 x 属于哪个区间：x_i <= x < x_{i+1}（最后一个点归到 n-1）
+    idx = np.clip(np.searchsorted(x, x_eval) - 1, 0, n - 1)
+    xi, xi1 = x[idx], x[idx + 1]
+    hi = xi1 - xi
+    # 三次样条分段公式（标准 Hermite 形式的等价写法）
+    t = (x_eval - xi) / hi
+    # 基函数
+    a = 1 - t
+    b = t
+    # 样条插值值：S = a*y_i + b*y_{i+1} + ((a^3 - a)*m_i + (b^3 - b)*m_{i+1}) * (hi^2/6)
+    S = (
+        a * y[idx]
+        + b * y[idx + 1]
+        + ((a**3 - a) * m[idx] + (b**3 - b) * m[idx + 1]) * (hi**2) / 6.0
+    )
+    return S if S.ndim else S.item()
+```
+
+
+### 三次样条小结与要点
+
+- **两步法**：
+
+  1) 解三对角系统得 $m$；
+  2) 在任意 $x$ 上用显式方法求值 $S(x)$。  
+- **数值稳定**：仅解一个条件良好的三对角系统；求值时只做常数次算术运算。  
+- 可以用下面的边界条件等价地替换上文自然边界的第一行或最后一行：  
+  - **Clamped 边界，端点给定一阶导**：用 $S'(x_0)=y'_0$、$S'(x_n)=y'_n$ 取代 $m_0=0,m_n=0$；  
+  - **Not-a-knot 边界**：要求 $x_1$ 与 $x_{n-1}$ 处三次多项式连续到三阶，是软件库的常用默认方法；  
+  - **周期（periodic）边界**：$S^{(k)}(x_0)=S^{(k)}(x_n)$（$k=0,1,2$）。
+- **与全局多项式对比**：样条是**分段低次、全局 $C^2$**；在节点多或等距时能显著缓解 Runge 振荡，且具有**局部性**。
+
+
+### 样条 vs 多项式插值：数值对比
+
+```{python}
+#| code-fold: true
+import numpy as np
+import matplotlib.pyplot as plt
+
+# 示例函数（可与 Runge 一致）
+f = lambda x: 1.0/(1.0 + 25.0*x*x)
+
+# 节点较多时：样条平滑稳定；高次多项式在等距点会抖
+n = 20
+xe = nodes_equidistant(-1, 1, n)
+ye = f(xe)
+
+# 多项式（重心）
+ye_hat = barycentric_eval(xe, ye, xs)
+
+# 样条
+spline = natural_cubic_spline(xe, ye)
+ys_hat = spline_eval(spline, xs)
+
+plt.figure(figsize=(7,4))
+plt.plot(xs, f(xs), 'k-', lw=1, label='f(x)')
+plt.plot(xs, ye_hat, '-', lw=1.2, label=f'poly (n={n})')
+plt.plot(xs, ys_hat, '-', lw=1.2, label=f'natural cubic spline ({n+1} nodes)')
+plt.plot(xe, ye, 'o', ms=3, label='nodes')
+plt.grid(True, alpha=0.3)
+plt.legend()
+plt.title("样条 vs 多项式插值（等距节点）")
+plt.xlabel("x"); plt.ylabel("y")
+plt.tight_layout()
+plt.show()
+```
+
+
+## 复杂度与工程选择
+
+* **牛顿差商**：预处理 $O(n^2)$，单点求值 $O(n)$，易增量更新，稳定性中等。
+* **重心**：权重预处理 $O(n^2)$（切比雪夫权重则是 $O(n)$ 可直接给出），单点求值 $O(n)$，**稳定性最好**。
+* **自然三次样条**：一次三对角求解 $O(n)$，对每点 $O(1)$求值，含二分查找 $O(\log n)$。
+* 工程实践上：
+
+  * 全局光滑且节点适中 → 重心 + 切比雪夫节点
+  * 节点较多/非均匀/需要局部可控 → 样条插值
+  * 需要在线追加节点 → 牛顿差商便于维护
+
+
+## 附：勒贝格函数与勒贝格常数
+
+**插值算子视角**
+
+给定插值节点 $x_0,\dots,x_n$，把“从样本值 $\{y_i\}$ 生成插值多项式 $p_n$”看成一个**线性算子** $I_n$。  
+对任意 $x$，拉格朗日基函数 $\{\ell_i(x)\}$ 满足 $p_n(x)=\sum_{i=0}^n y_i\,\ell_i(x)$。
+
+**勒贝格函数（Lebesgue function）**定义为
+$$
+\Lambda_n(x)=\sum_{i=0}^n |\ell_i(x)|.
+$$
+
+**勒贝格常数（Lebesgue constant）**是其在区间上的上界：
+$$
+\Lambda_n = \max_{x\in[a,b]} \Lambda_n(x).
+$$
+
+**意义 1：噪声或扰动的放大系数**  
+若观测存在扰动 $\tilde y_i = y_i+\delta_i$，则
+$$
+|I_n(\tilde y)(x)-I_n(y)(x)|
+= \Bigl|\sum_{i=0}^n \delta_i\,\ell_i(x)\Bigr|
+\le \Lambda_n(x)\,\max_i |\delta_i|.
+$$
+
+因此 $\Lambda_n$ 描述了**样本扰动被插值放大**的最坏情况。
+
+**意义 2：插值误差的上界**  
+对任意至多 $n$ 次多项式 $q$，有 $I_n(q)=q$。于是对一般 $f$：
+$$
+\begin{aligned}
+|f(x)-p_n(x)|
+&= |f(x)-q(x)+I_n(q)(x)-I_n(f)(x)| \\
+&\le |f(x)-q(x)| + \Lambda_n(x)\,\|f-q\|_\infty.
+\end{aligned}
+$$
+
+取区间上最大并对 $q$ 最优（最佳一致逼近多项式），得到常见上界：
+$$
+\|f-p_n\|_\infty \le (1+\Lambda_n)\min_{q\in\Pi_n}\|f-q\|_\infty
+$$
+
+**节点选择**（影响 $\Lambda_n$ 的大小）比盲目“加阶”更关键：
+
+- 等距节点的 $\Lambda_n$ 随 $n$ 增长很快，端点振荡严重 
+- 切比雪夫类节点的 $\Lambda_n$ 仅**对数级增长**，显著更稳定
+
+> $\ell_i(x)$ 是“权重”，$\Lambda_n(x)$ 是**权重绝对值之和**；权重越温和，误差与噪声越不易被放大。
+
+## 附：三对角矩阵
+
+**样条方程的结构**
+
+设 $x_0<\cdots<x_n$，$h_i=x_{i+1}-x_i>0$，记 $m_i=S''(x_i)$。自然边界给出 $m_0=m_n=0$。内点 $i=1,\dots,n-1$ 满足
+$$
+h_{i-1}\,m_{i-1} + 2(h_{i-1}+h_i)\,m_i + h_i\,m_{i+1}
+= 6\Bigl(\frac{y_{i+1}-y_i}{h_i}-\frac{y_i-y_{i-1}}{h_{i-1}}\Bigr).
+$$
+
+对应线性系统的系数矩阵 $A$ 是**三对角**（仅主对角与相邻两条对角线非零）：
+$$
+A=
+\begin{bmatrix}
+1 &        &        &        &        \\
+h_0 & 2(h_0{+}h_1) & h_1    &        &        \\
+    & \ddots & \ddots & \ddots &        \\
+    &        & h_{n-2} & 2(h_{n-2}{+}h_{n-1}) & h_{n-1} \\
+    &        &        &        & 1
+\end{bmatrix}.
+$$
+
+该矩阵在内部行满足
+$\;2(h_{i-1}{+}h_i) > h_{i-1}+h_i\;$，因此**严格对角占优**，数值稳定且唯一可解。
+ 
+三对角系统可用 **Thomas 算法（追赶法）** 在线性时间 $O(n)$ 求解：  
+
+- **前向消元**：仅消去下对角，每行常数次运算  
+- **回代**：从末行向上回代，同样每行常数次运算  
+
+相较于一般稠密 $n{\times}n$ 系统的 $O(n^3)$ 高斯消元，三对角仅需 $O(n)$。
+
+```{python}
+#| code-fold: true
+import numpy as np
+
+def solve_tridiag(a, b, c, d):
+    """
+    解三对角系统：
+      a_i x_{i-1} + b_i x_i + c_i x_{i+1} = d_i
+    其中 a[0]=c[-1]=0（或忽略），长度均为 n。
+    返回 x（长度 n）。
+    """
+    a = np.asarray(a, dtype=np.float64).copy()
+    b = np.asarray(b, dtype=np.float64).copy()
+    c = np.asarray(c, dtype=np.float64).copy()
+    d = np.asarray(d, dtype=np.float64).copy()
+    n = len(b)
+
+    # 前向消元
+    for i in range(1, n):
+        w = a[i] / b[i-1]
+        b[i] = b[i] - w * c[i-1]
+        d[i] = d[i] - w * d[i-1]
+
+    # 回代
+    x = np.empty(n, dtype=np.float64)
+    x[-1] = d[-1] / b[-1]
+    for i in range(n-2, -1, -1):
+        x[i] = (d[i] - c[i] * x[i+1]) / b[i]
+    return x
+```
+
+**在自然样条中组装 $(a,b,c,d)$**
+对内点 $i=1..n-1$：
+
+$$
+a_i=h_{i-1},\quad b_i=2(h_{i-1}{+}h_i),\quad c_i=h_i,\quad
+d_i=6\Bigl(\frac{y_{i+1}-y_i}{h_i}-\frac{y_i-y_{i-1}}{h_{i-1}}\Bigr).
+$$
+
+边界 $m_0=m_n=0$ 可直接赋值，不进入求解；或把首末两行设为 $[1]$（上文矩阵形式），对应 $a_0=c_0=a_n=c_n=0$, $b_0=b_n=1$, $d_0=d_n=0$。
+
+::: callout-note
+自然样条的三对角矩阵**对称且严格对角占优**（内部块），因此不需主元选取即可稳定求解。这也是样条在工程中的重要优势之一。
+:::
+
+## 小结
+
+* 拉格朗日直观、牛顿可增量、重心稳定是首选。
+* **节点选择**胜过单纯“加阶数”，切比雪夫节点有效控制端点振荡。
+* **样条**提供分段低次、全局 $C^2$ 光滑的强大替代方案，工程中更常用
+
+## 课后作业
+
+### a3-1（必做）：计算与证明：
+
+推导牛顿差商递推式与其**对称性**。
+
+### a3-2（选做）：编程实现 **Clamped** 三次样条
+
+1. 将重心插值封装为**统一的 API**：`fit(x, y, kind="bary"/"newton"/"spline")` 与 `predict(x_eval)`
+2. 在 $f(x)=|x|$ 与 $f(x)=\exp(x)$ 两个函数上比较三种方法的最大误差与时间开销，并给出图表
+
+
+## JAX 附录：对比 NumPy 基准
+
+使用函数 $\displaystyle \mathrm{sinc}_\pi(x)=\frac{\sin(\pi x)}{\pi x}$（在 $x=0$ 处定义为 1）。  
+
+- 目的：在同一节点与同一求值网格上，比较 **NumPy** 与 **JAX（CPU, 64-bit, `jit`+`vmap`）** 的 **重心插值**效果与性能。同时对比等距节点与第二类切比雪夫节点。
+- 要点：
+  - JAX 版本采用**通用权重** $w_i = 1/\prod_{j\ne i}(x_i-x_j)$ 的 O($n^2$) 实现；  
+  - 求值阶段使用 `vmap` 批量化 + `jit` 编译，避免 Python 循环；  
+  - 64-bit 开启：`jax.config.update("jax_enable_x64", True)`；  
+  - 结果与 NumPy 版在数值上应一致（到浮点 10⁻¹⁴～10⁻¹⁵ 量级）。
+
+### 代码：NumPy 版
+```{python}
+import numpy as np
+import time
+import matplotlib.pyplot as plt
+
+
+# 函数：sinc_pi(x) = sin(pi x)/(pi x)
+def sinc_pi(x: np.ndarray) -> np.ndarray:
+    x = np.asarray(x, dtype=np.float64)
+    y = np.empty_like(x)
+    # 避免 0/0
+    zero = x == 0
+    y[zero] = 1.0
+    nz = ~zero
+    y[nz] = np.sin(np.pi * x[nz]) / (np.pi * x[nz])
+    return y
+
+
+# 节点映射到 [-L, L]
+def nodes_equidistant(a, b, n):
+    j = np.arange(n + 1, dtype=np.float64)
+    return a + (b - a) * j / n
+
+
+def nodes_chebyshev_lobatto(a, b, n):
+    j = np.arange(n + 1, dtype=np.float64)
+    xi = np.cos(np.pi * j / n)  # in [-1,1]
+    return (a + b) / 2 + (b - a) / 2 * xi
+
+
+# 重心（NumPy）
+def barycentric_weights_np(x_nodes):
+    x = np.asarray(x_nodes, dtype=np.float64)
+    n = len(x)
+    w = np.ones(n, dtype=np.float64)
+    for j in range(n):
+        w[j] = 1.0 / np.prod(x[j] - np.delete(x, j))
+    return w
+
+
+def barycentric_eval_np(x_nodes, y_nodes, x, w=None):
+    x_nodes = np.asarray(x_nodes, dtype=np.float64)
+    y_nodes = np.asarray(y_nodes, dtype=np.float64)
+    if w is None:
+        w = barycentric_weights_np(x_nodes)
+    w = np.asarray(w, dtype=np.float64)
+    x = np.atleast_1d(np.asarray(x, dtype=np.float64))
+
+    out = np.empty_like(x)
+    for k, xv in enumerate(x):
+        diff = xv - x_nodes
+        idx = np.where(diff == 0)[0]
+        if len(idx) > 0:
+            out[k] = y_nodes[idx[0]]
+        else:
+            num = np.sum(w * y_nodes / diff)
+            den = np.sum(w / diff)
+            out[k] = num / den
+    return out
+```
+
+### 代码：JAX 版
+
+```{python}
+import jax, jax.numpy as jnp
+
+jax.config.update("jax_enable_x64", True)
+
+
+# 通用权重（O(n^2)），用广播 + 对角置 1 避免零因子
+def barycentric_weights_jax(x_nodes):
+    x = jnp.asarray(x_nodes, dtype=jnp.float64)
+    n = x.shape[0]
+    diff = x[:, None] - x[None, :]
+    diff = diff + jnp.eye(n, dtype=x.dtype)  # 使对角为 1
+    prod = jnp.prod(diff, axis=1)
+    w = 1.0 / prod
+    return w
+
+
+# 单点求值，处理与节点重合
+def barycentric_eval_one_jax(x_nodes, y_nodes, w, xv):
+    diff = xv - x_nodes
+    # 精确相等判断：插值时求值点常与节点完全一致
+    mask = diff == 0.0
+
+    def coincident():
+        # 返回对应 y_k，若多于一个 True，argmax 取第一个
+        return y_nodes[jnp.argmax(mask)]
+
+    def general():
+        num = jnp.sum(w * y_nodes / diff)
+        den = jnp.sum(w / diff)
+        return num / den
+
+    return jax.lax.cond(mask.any(), coincident, general)
+
+
+# 向量化 + JIT
+def make_bary_eval_many_jax(x_nodes, y_nodes, w):
+    x_nodes = jnp.asarray(x_nodes, dtype=jnp.float64)
+    y_nodes = jnp.asarray(y_nodes, dtype=jnp.float64)
+    w = jnp.asarray(w, dtype=jnp.float64)
+
+    def eval_many(x):
+        x = jnp.asarray(x, dtype=jnp.float64)
+        return jax.vmap(lambda xv: barycentric_eval_one_jax(x_nodes, y_nodes, w, xv))(x)
+
+    return jax.jit(eval_many)
+```
+
+### 对比实验：NumPy vs JAX
+
+```{python}
+L = 5.0
+n = 20  # 插值阶数（n+1 个节点）
+xs = np.linspace(-L, L, 20001, dtype=np.float64)  # 稠密网格
+fx = sinc_pi(xs)
+
+
+def run_once(x_nodes):
+    y_nodes = sinc_pi(x_nodes)
+
+    # NumPy
+    w_np = barycentric_weights_np(x_nodes)
+    t0 = time.perf_counter()
+    y_np = barycentric_eval_np(x_nodes, y_nodes, xs, w_np)
+    t1 = time.perf_counter()
+
+    out = {"y_np": y_np, "t_np_ms": (t1 - t0) * 1e3, "w_np": w_np, "y_nodes": y_nodes}
+
+    # JAX
+    xj = jnp.asarray(x_nodes, dtype=jnp.float64)
+    yj = jnp.asarray(y_nodes, dtype=jnp.float64)
+    wj = barycentric_weights_jax(xj)
+
+    eval_many = make_bary_eval_many_jax(xj, yj, wj)
+
+    # 预热（编译）
+    _ = np.array(eval_many(jnp.asarray(xs[:8])))
+
+    # 计时（已编译态）
+    t2 = time.perf_counter()
+    y_jax = np.array(eval_many(jnp.asarray(xs)))
+    t3 = time.perf_counter()
+    out.update({"y_jax": y_jax, "t_jax_ms_hot": (t3 - t2) * 1e3})
+
+    # 数值一致性
+    out["max_abs_diff"] = float(np.max(np.abs(y_jax - y_np)))
+    return out
+
+
+# 等距节点
+xe = nodes_equidistant(-L, L, n)
+res_e = run_once(xe)
+
+# Chebyshev-Lobatto 节点
+xc = nodes_chebyshev_lobatto(-L, L, n)
+res_c = run_once(xc)
+
+print(f"[Equidistant]  NumPy: {res_e['t_np_ms']:.2f} ms", end="")
+if jax is not None:
+    print(
+        f",  JAX (hot): {res_e['t_jax_ms_hot']:.2f} ms,  max|Δ|={res_e['max_abs_diff']:.2e}"
+    )
+else:
+    print()
+
+print(f"[Cheb-Lobatto]  NumPy: {res_c['t_np_ms']:.2f} ms", end="")
+if jax is not None:
+    print(
+        f",  JAX (hot): {res_c['t_jax_ms_hot']:.2f} ms,  max|Δ|={res_c['max_abs_diff']:.2e}"
+    )
+else:
+    print()
+
+# 画图
+fig, axes = plt.subplots(2, 2, figsize=(11, 6), sharex="col")
+
+# 上：插值曲线
+axes[0, 0].plot(xs, fx, label="f(x)=sinc_π(x)")
+axes[0, 0].plot(xs, res_e["y_np"], label=f"poly (n={n}) @ equidistant")
+axes[0, 0].plot(xe, res_e["y_nodes"], "o", ms=3, label="nodes")
+axes[0, 0].set_title("等距节点：插值曲线")
+axes[0, 0].legend(fontsize=9)
+axes[0, 0].grid(True, alpha=0.3)
+
+axes[0, 1].plot(xs, fx, label="f(x)=sinc_π(x)")
+axes[0, 1].plot(xs, res_c["y_np"], label=f"poly (n={n}) @ Chebyshev-Lobatto")
+axes[0, 1].plot(xc, res_c["y_nodes"], "o", ms=3, label="nodes")
+axes[0, 1].set_title("切比雪夫节点：插值曲线")
+axes[0, 1].legend(fontsize=9)
+axes[0, 1].grid(True, alpha=0.3)
+
+# 下：误差（对数 y）
+e_e = np.abs(res_e["y_np"] - fx)
+e_c = np.abs(res_c["y_np"] - fx)
+axes[1, 0].semilogy(xs, e_e)
+axes[1, 0].set_title("等距：|误差|")
+axes[1, 0].grid(True, which="both", alpha=0.3)
+axes[1, 0].set_xlabel("x")
+
+axes[1, 1].semilogy(xs, e_c)
+axes[1, 1].set_title("切比雪夫：|误差|")
+axes[1, 1].grid(True, which="both", alpha=0.3)
+axes[1, 1].set_xlabel("x")
+
+plt.tight_layout()
+plt.show()
+```
+
+
+* **性能**：`NumPy` 与 `JAX (hot)` 的耗时取决于求值点规模与 CPU。对于本例，`JAX` 往往能接近或略优于纯 NumPy 循环实现。首次调用包含编译时间，不用于对比。
+* **数值**：`max|Δ|` 显示 JAX 与 NumPy 的差异通常在 $10^{-15}$ 量级（同 64-bit）。
+* **节点**：在高阶时，**Chebyshev–Lobatto** 节点更稳定、边界误差更小。等距节点误差在区间端部更大。
