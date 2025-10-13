@@ -1,0 +1,720 @@
+---
+title: "多项式最小二乘"
+---
+
+## 学习目标
+
+* 从**投影**与**最优化**两种角度推导**最小二乘**及其**正规方程**。
+* 认识 Vandermonde 矩阵的**病态性**、为何**QR**比正规方程更稳。
+* 构造 $A$，解方程 $A^\top A\,c=A^\top y$ 并对比三种实现：
+
+  1. **“公式翻译”**直接求解并讨论奇异性；
+  2. **迭代求解**：Gram–Schmidt 正交化（含 MGS）；
+  3. **“调库求解”**，调用NumPy 库`lstsq`/`polyfit`实现求解。
+* 形成对**正则化（Ridge）**的直觉。
+* 了解在同一个函数空间**换基**的作用。
+
+
+## 示例与数据准备
+
+* 目标：用**$d$ 次多项式** $p_d(x)=\displaystyle\sum_{k=0}^d c_k x^k$ 拟合数据 $(x_i,y_i)$。
+* 示例数据 1 光滑：$y=\exp(x)+\text{噪声}$，$x\in[0,1]$。
+* 示例数据 2 非光滑：$y=|x|+\text{噪声}$，$x\in[-1,1]$。
+
+```{python}
+# | code-fold: true
+import numpy as np
+import matplotlib.pyplot as plt
+
+plt.rcParams["font.sans-serif"] = ["PingFang SC", "Arial Unicode MS"]
+plt.rcParams["axes.unicode_minus"] = False
+
+rng = np.random.default_rng(42)
+
+
+def make_data(func, a, b, n=60, noise=0.02):
+    x = np.linspace(a, b, n, dtype=np.float64)
+    y = func(x)
+    y_noisy = y + noise * rng.standard_normal(size=x.shape)
+    return x, y, y_noisy
+
+
+f_exp = lambda x: np.exp(x)
+f_abs = lambda x: np.abs(x)
+
+x1, y1_true, y1 = make_data(f_exp, 0.0, 1.0, n=60, noise=0.02)
+x2, y2_true, y2 = make_data(f_abs, -1.0, 1.0, n=60, noise=0.02)
+
+fig, ax = plt.subplots(2, 1, figsize=(6, 6))
+ax[0].plot(x1, y1_true, "k-", lw=1, label="exp(x)")
+ax[0].plot(x1, y1, "o", ms=3, label="noisy")
+ax[0].set_title("示例 1：exp(x)")
+ax[0].legend()
+ax[0].grid(True, alpha=0.3)
+
+ax[1].plot(x2, y2_true, "k-", lw=1, label="|x|")
+ax[1].plot(x2, y2, "o", ms=3, label="noisy")
+ax[1].set_title("示例 2：|x|")
+ax[1].legend()
+ax[1].grid(True, alpha=0.3)
+plt.tight_layout()
+plt.show()
+```
+
+
+
+## 线性系统
+
+**观测/模型假设**
+
+给定标量自变量数据点 $(x_i,y_i) (i=1,\dots,n)$，用**次数不超过 $d$ 的多项式**近似真实关系：
+$$
+p_d(x)=c_0+c_1x+c_2x^2+\cdots+c_dx^d=\sum_{k=0}^{d}c_k\, x^k,
+$$
+
+并允许噪声（建模误差）
+
+$$
+y_i = p_d(x_i)+\varepsilon_i=\sum_{k=0}^{d}c_k\,x_i^k+\varepsilon_i.
+$$
+
+逐点写成**线性方程组**（线性系统）：
+$$
+\underbrace{1\cdot c_0 + x_i\cdot c_1 + x_i^2\cdot c_2 + \cdots + x_i^d\cdot c_d}_{=\;p_d(x_i)}
+= y_i - \varepsilon_i,\qquad i=1,\dots,n.
+$$
+
+::: callout-note
+为什么叫“线性”？因为对未知向量 $c=(c_0,\dots,c_d)^\top$ 是线性的
+:::
+
+把这些方程**按行叠放**，就得到矩阵–向量形式
+$$
+A c = y - \varepsilon,\qquad
+A=\begin{bmatrix}
+1 & x_1 & x_1^2 & \cdots & x_1^d\\
+1 & x_2 & x_2^2 & \cdots & x_2^d\\
+\vdots & \vdots & \vdots &  & \vdots\\
+1 & x_n & x_n^2 & \cdots & x_n^d
+\end{bmatrix}\in\mathbb{R}^{n\times(d+1)},\,
+c\in\mathbb{R}^{d+1},\,
+y\in\mathbb{R}^{n}.
+$$
+
+这就是 **（单项式基的）Vandermonde 设计矩阵**。其第 $i$ 行是把多项式基 $[1,x,x^2,\dots,x^d]$ 在 $x_i$ 处形成的行向量上求值。
+
+* 若 $n=d+1$ 且 $x_i$ 互异，则 $A$ 可逆，对应就是**插值**；
+* 更常见 $n>d+1$，方程超定 $Ac\approx y$，需要“最优意义下”的解：**最小二乘**。
+
+
+## 由线性系统到最小二乘
+
+**最小二乘问题**
+
+用残差 $r(c)=Ac-y$ 度量拟合误差，取 2-范数平方：
+$$
+\min_{c\in\mathbb{R}^{d+1}} \; \lVert r(c)\rVert_2^2 = \min_c \; (Ac-y)^\top(Ac-y).
+$$
+
+**一阶最优性条件**
+
+令
+$$
+f(c)=\frac{1}{2} \lVert Ac-y\rVert_2^2=\frac{1}{2}(Ac-y)^\top(Ac-y).
+$$
+
+梯度
+$$
+\nabla f(c)=A^\top(Ac-y).
+$$
+
+令梯度为零得**正规方程（normal equations）**：
+$$
+\boxed{A^\top A\,c = A^\top y}\
+$$
+
+::: callout-warning
+$A^\top A$ 的条件数 $\kappa(A^\top A)=\kappa(A)^2$ ，将会**病态放大**
+:::
+
+* 若 $A$ **满列秩**（列线性无关），则 $A^\top A$ 可逆，$c^\star=(A^\top A)^{-1}A^\top y$ 唯一；
+* 否则，解不唯一，用 SVD 得到**最小二乘解**集合为
+$$
+\{c:\;c=c_0+z,\,A^\top Az=0\}
+$$
+其中最小范数解为 $c^\star=A^+y$，这里 $A^+$ 是 Moore-Penrose **伪逆**（pseudoinverse）。
+
+**正则化**
+
+当 $A$ 病态或过拟合风险高时，考虑引进正则化项
+
+$$
+\min_c\;\|Ac-y\|_2^2 + \lambda\|c\|_2^2
+\quad\Longrightarrow\quad
+(A^\top A+\lambda I)c=A^\top y.
+$$
+
+相当于抑制“大系数”（高频高阶），换取更小方差。$\lambda$ 越大，曲线越“平”
+
+**几何解释**
+
+在 2-范数诱导的内积下，$$\hat y=Ac^\star$$ 是 $y$ 在 $\mathcal{C}(A)$（$A$ 的列空间）上的**正交投影**，残差 $r^\star=y-\hat y$ 与 $\mathcal{C}(A)$ 正交：$A^\top r^\star=0$。
+这个正交投影结构只对（加权）2-范数成立，是 2-范数特别“好用”的核心原因。
+
+**数值实现**
+
+正规方程可得公式解，但更稳健的是**QR分解**或**SVD**：
+
+* $A=QR$（$Q$ 列正交，$R$ 上三角），解 $Rc=Q^\top y$；
+* SVD $A=U\Sigma V^\top$ 可处理病态/退化，更稳但更贵。
+
+::: callout-tip
+Vandermonde 的条件数随 $d$ 爆炸，建议**对 $x$ 居中缩放到 $[-1,1]$** 或改用正交多项式基如 Chebyshev 或 Legendre
+:::
+
+
+## 选择 2-范数的原因
+
+### 统计视角（极大似然 / 噪声模型）
+
+* 若 $\varepsilon_i \overset{\text{i.i.d.}}{\sim}\mathcal{N}(0,\sigma^2)$（同方差，高斯噪声），最大似然估计**等价**于最小化 $|Ac-y|_2^2$。
+* 若 $\varepsilon_i$ 具有协方差 $\mathrm{Cov}(\varepsilon)=\sigma^2 W^{-1}$（异方差，相关），则**加权最小二乘**最优：
+  $$
+  \min_c \Vert W^{1/2}(Ac-y)\rVert_2^2 \quad\Longleftrightarrow\quad A^\top W A\,c=A^\top W y.
+  $$
+
+  这是 2-范数在**马氏度量**加权内积下的推广，也保持投影结构。
+
+### 几何与计算视角
+
+* 2-范数来自内积，带来**正交性**与**投影**，从而有 QR、SVD 等**稳定而高效**的算法。
+* 目标函数二次可微、严格凸（满列秩时），解与数据**连续稳定**：对小扰动不太敏感，与条件数相关。
+
+### 若改用其他范数
+
+#### $\ell_1$ 范数
+
+最小绝对偏差（LAD）
+$$
+\min_c \lVert Ac-y\rVert_1=\min_c \sum_{i=1}^n |a_i^\top c-y_i|.
+$$
+
+* **优点**：对离群点鲁棒；对应 $\varepsilon_i\sim\mathrm{Laplace}$ 的极大似然。
+* **特点**：不可微，不再是正交投影，通常转化为**线性规划**或用 IRLS、次梯度求解。
+* **副作用**：解可能**不唯一**，数值上对噪声分布，权重更敏感。
+
+#### $\ell_\infty$ 范数
+
+Chebyshev 一致逼近
+$$
+\min_c \Vert Ac-y\rVert_\infty=\min_c \max_i |a_i^\top c-y_i|.
+$$
+
+* **目标**：最小化最坏点误差，与**极小极大**逼近有关，经典上用 Remez 交换算法。
+* **几何**：无内积，无投影，可转为带辅助变量的线性规划。
+* **用途**：想要整体误差上界最小的时候，例如硬件约束下的逼近设计。
+
+#### 一般 $\ell_p$ （$p\ge 1$）
+$$
+\min_c \lVert Ac-y\rVert_p^p = \min_c \sum_i |a_i^\top c - y_i|^p.
+$$
+
+* $p=2$ 二次可微、线性正交条件，$1<p<2$ 对离群点**更稳健**但仍可微；
+* $p>2$ 会**放大较大残差**，对离群点不稳健；
+* 统计上对应**广义高斯**噪声的极大似然。
+
+#### Huber或分段二次等
+
+* 折中 $\ell_2$ 与 $\ell_1$，小残差用平方，大残差用绝对值，需要迭代求解。
+
+
+## 实践：从“公式翻译”到“调库求解”
+
+### 定义几个工具函数
+
+```{python}
+import numpy as np
+
+
+def vander(x, deg: int):
+    """
+    构造单项式基（monomial basis）的 Vandermonde 设计矩阵 A ∈ R^{n×(deg+1)}。
+
+    定义
+    ----
+    给定样本点 x = [x1, x2, ..., xn]，返回
+        A[i, j] = x_i**j,  其中 i=0..n-1, j=0..deg
+    即 A 的各列依次为 [1, x, x^2, ..., x^deg]，与系数向量
+        c = [c0, c1, ..., c_deg]^T
+    搭配使用时，Ac 就是在所有样本点处的多项式取值：
+        p(x_i) = sum_{j=0}^deg c_j * x_i**j
+
+    参数
+    ----
+    x : array_like, shape (n,)
+        自变量取值；可为列表/NumPy 数组或标量（标量将被视为 n=1 的特例）。
+    deg : int >= 0
+        多项式的最高次数 d。
+
+    返回
+    ----
+    A : ndarray, shape (n, deg+1)
+        Vandermonde 设计矩阵。其列顺序与 numpy.vander(x, N=deg+1, increasing=True) 一致，
+        便于与 c=[c0,...,c_deg]^T 直接相乘。
+    """
+    x = np.asarray(x, dtype=np.float64)  # 传入列表/标量并统一dtype
+    n = x.size  # 支持标量（size=1）与一维数组
+    A = np.ones((n, deg + 1), dtype=np.float64)  # 第 0 列恒为 1，对应常数项 c0
+    for k in range(1, deg + 1):
+        # 递推生成第 k 列：x^k = x^(k-1) * x
+        # 向量化写法一次性填充整列，避免逐行循环的 Python 开销
+        A[:, k] = A[:, k - 1] * x
+    return A
+
+
+def polyval_monomial(c, x):
+    """
+    用秦九韶-Horner方法在单项式基上求值多项式 p(x)，支持向量化的 x。
+
+    系数顺序约定
+    -----------
+    期望的系数为 c = [c0, c1, ..., c_d]，与 vander(..., increasing=True) 对齐：
+        p(x) = c0 + c1*x + ... + c_d*x^d
+    因此 (vander(x, d) @ c) 与本函数的输出应一致（在数值误差范围内）。
+
+    参数
+    ----
+    c : array_like, shape (d+1,)
+        多项式系数，c[0] 为常数项，c[-1] 为最高次项系数。
+    x : array_like
+        求值点；可为标量或任意形状的数组（广播友好）。
+
+    返回
+    ----
+    p : ndarray, shape == np.shape(x)
+        在 x 上逐元素求值得到的多项式值。若 x 为标量则返回 0 维数组（NumPy 约定）。
+    """
+    x = np.asarray(x, dtype=np.float64)
+    p = np.zeros_like(x) + c[-1]  # 起始为最高次项系数 c_d
+    # 依次合入 c_{d-1}, c_{d-2}, ..., c_0： p ← c_k + x * p
+    for a in reversed(c[:-1]):
+        p = a + p * x  # 完全向量化：一次更新所有 x 位置
+    return p
+
+```
+
+可以试着检查一下
+
+```{python}
+x = np.array([0.2, 0.5, 1.0])
+deg = 4
+c = np.arange(deg + 1, dtype=float)  # [0,1,2,3,4]
+A = vander(x, deg)
+assert np.allclose(A @ c, polyval_monomial(c, x))
+print(A @ c, polyval_monomial(c, x))
+```
+
+### Demo 4-1 “公式翻译”
+
+直接求解正规方程
+
+```{python}
+def ls_normal_equations(x, y, deg, ridge_lambda=0.0):
+    """
+    用正规方程 A^T A c = A^T y（岭项可选）解多项式最小二乘。
+    返回: (c, info, A) 其中 info ∈ {"solve","pinv"} 表示求解分支。
+    """
+    A = vander(x, deg)  # 设计矩阵（1, x, x^2, ... , x^deg）
+    ATA = A.T @ A       # A^T A
+    ATy = A.T @ y       # A^T y
+    if ridge_lambda > 0:
+        ATA = ATA + ridge_lambda * np.eye(ATA.shape[0])  # 岭正则提高病态时的可解性
+
+    # 直接求解，若奇异/近奇异，则退为伪逆
+    try:
+        c = np.linalg.solve(ATA, ATy)  # 首选线性方程求解
+        info = "solve"
+    except np.linalg.LinAlgError:
+        c = np.linalg.pinv(ATA) @ ATy  # 退路是最小范数解
+        info = "pinv"
+    return c, info, A
+```
+
+::: callout-warning
+高阶或未缩放的 $x$ 易病态。
+:::
+
+::: callout-warning
+岭项 `ridge_lambda>0` 可缓解病态，但会引入偏差。
+:::
+
+### Demo 4-2 迭代求解
+
+用改进的 Gram–Schmidt（MGS）做 QR，并求解最小二乘
+
+**目标**
+
+对 $A\in\mathbb{R}^{n\times m}$（$n\ge m$）做 $A=QR$，其中 $Q^\top Q=I_m$（列正交），$R$ 为上三角。
+
+**算法**
+
+把列写作 $A=[a_1,\dots,a_m]$。MGS 对第 $j$ 列的步骤如下：
+
+1. 置 $v_j\leftarrow a_j$。
+2. 依次消去先前方向的分量：对 $i=1,\dots,j-1$，
+    $$
+    r_{ij}=q_i^\top v_j,\quad v_j\leftarrow v_j-r_{ij}q_i .
+    $$
+3. 归一化得到新方向：
+    $$
+    r_{jj}=\lVert v_j\rVert_2,\quad q_j=v_j/r_{jj}.
+    $$
+    最终 $Q=[q_1,\dots,q_m],\ R=[r_{ij}]_{i\le j}$，满足 $A=QR$。
+
+**用 QR 解最小二乘**
+
+给定 $Ac\approx y$，有
+ $$
+ \lVert Ac-y\rVert_2=\Vert QRc-y\rVert_2=\lVert Rc-Q^\top y\rVert_2,
+ $$
+
+ 因为 $Q$ 列正交。若 $A$ 满列秩，最优解满足**三角方程**
+ $$
+ Rc=Q^\top y
+ $$
+ 
+ 回代即可。
+
+```{python}
+import numpy as np
+
+def qr_mgs(A):
+    """
+    改进的 Gram–Schmidt（MGS）QR 分解：A = Q R
+    Q: n×m，列正交；R: m×m 上三角。A 假定 n×m, n>=m。
+    """
+    A = np.asarray(A, dtype=np.float64)
+    n, m = A.shape
+    Q = np.zeros((n, m), dtype=np.float64)
+    R = np.zeros((m, m), dtype=np.float64)
+    V = A.copy()  # 工作副本：逐列消去已有方向的分量
+
+    for j in range(m):
+        # 依次从第 j 列中减去前面各 q_i 的投影
+        for i in range(j):
+            R[i, j] = Q[:, i] @ V[:, j]    # r_ij = q_i^T v_j
+            V[:, j] -= R[i, j] * Q[:, i]   # v_j ← v_j - r_ij q_i
+
+        R[j, j] = np.linalg.norm(V[:, j])  # r_jj = ||v_j||
+        if R[j, j] == 0:                   # 列线性相关：列秩不足
+            raise np.linalg.LinAlgError("Rank deficiency in MGS")
+            # 可改用阈值判断或进行再正交或主元策略
+
+        Q[:, j] = V[:, j] / R[j, j]        # q_j = v_j / r_jj
+
+    return Q, R
+
+
+def ls_via_qr_mgs(x, y, deg):
+    """
+    用 MGS-QR 求解多项式最小二乘：
+      1) A ← vander(x, deg)
+      2) A = Q R
+      3) 解 R c = Q^T y （上三角回代，solve）
+    返回 (c, Q, R)
+    """
+    A = vander(x, deg)
+    Q, R = qr_mgs(A)
+    c = np.linalg.solve(R, Q.T @ y)         # 因 Q 列正交，最小化 ||Rc - Q^T y||
+    return c, Q, R
+```
+
+::: callout-tip
+数值计算库里一般用 **Householder** 算法更稳定
+:::
+
+
+### Demo 4-3 NumPy 库
+
+实际工作中用库方法 `lstsq` 与 `polyfit`
+
+```{python}
+def ls_numpy(x, y, deg):
+    A = vander(x, deg)
+    # lstsq 默认用 LAPACK，基于 QR/SVD
+    c, *_ = np.linalg.lstsq(A, y, rcond=None)
+    return c
+
+def ls_numpy_polyfit(x, y, deg):
+    # 返回按 x^deg ... x^0；与我们 c 的顺序相反
+    c_desc = np.polyfit(x, y, deg=deg)
+    return c_desc[::-1]  # 改成 [c0,c1,...,c_deg]
+```
+
+
+### 实验 1：比较三种方法对 `f_exp(x)` 生成数据的拟合效果
+
+```{python}
+# | code-fold: true
+import matplotlib.pyplot as plt
+
+
+def fit_and_plot(x, y, y_true, deg, ridge_lambda=0.0, title=""):
+    # 三种求解：正规方程（可选岭）、QR(MGS)、调库
+    c_ne, info, A = ls_normal_equations(x, y, deg, ridge_lambda=ridge_lambda)
+    c_qr = ls_via_qr_mgs(x, y, deg)[0]
+    c_np = ls_numpy(x, y, deg)
+
+    # 为绘图生成致密自变量网格，并计算三种方法的拟合曲线
+    xs = np.linspace(x.min(), x.max(), 1000, dtype=np.float64)
+    ys_ne = polyval_monomial(c_ne, xs)
+    ys_qr = polyval_monomial(c_qr, xs)
+    ys_np = polyval_monomial(c_np, xs)
+
+    # 训练集预测，这里用“库方法”的 yhat 做统一对比
+    yhat = polyval_monomial(c_np, x)
+
+    # 简易 RMSE 度量，训练误差
+    rmse = lambda a, b: np.sqrt(np.mean((a - b) ** 2))
+
+    # 打印模型阶数、A的条件数（诊断病态）、以及正规方程分支信息（直接解或伪逆）
+    print(
+        f"[{title}] deg={deg}  cond(A)≈{np.linalg.cond(A):.2e}   method(normal-eq={info})"
+    )
+    print(
+        " RMSE(train): NE={:.3e} QR={:.3e} NP={:.3e}".format(
+            rmse(polyval_monomial(c_ne, x), y),  # 正规方程
+            rmse(polyval_monomial(c_qr, x), y),  # QR(MGS)
+            rmse(yhat, y),  # 调库
+        )
+    )
+
+    # 左图：真值曲线，带噪散点，以及三种拟合曲线
+    # 右图：残差茎叶图，观测模式与过拟合迹象
+    fig, ax = plt.subplots(1, 2, figsize=(11, 4))
+
+    # 左：数据与拟合
+    # 注意：y_true 是“真实函数在采样点”的值，用于对照
+    ax[0].plot(x, y_true, "k-", lw=1, label="true")  # 真值（若可用）
+    ax[0].plot(x, y, "o", ms=3, label="noisy")  # 观测点
+    ax[0].plot(xs, ys_ne, "-", label=f"normal-eq (λ={ridge_lambda})")  # 正规方程
+    ax[0].plot(xs, ys_qr, "--", label="QR (MGS)")  # QR(MGS)
+    ax[0].plot(xs, ys_np, ":", label="np.lstsq")  # 调库
+    ax[0].legend(fontsize=9)
+    ax[0].grid(True, alpha=0.3)
+    ax[0].set_title(title)
+
+    # 右：残差，这里展示“库方法”的残差
+    res = y - polyval_monomial(c_np, x)
+    ax[1].stem(x, res, basefmt=" ")  # 非随机结构，模型错配/异方差等
+    ax[1].set_title("残差（库）")
+    ax[1].grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.show()
+
+
+# 低阶：一般较稳，作基线
+fit_and_plot(x1, y1, y1_true, deg=5, title="f_exp(x)")
+
+# 高阶：更易病态与过拟合，观察 cond(A) 与曲线振荡
+fit_and_plot(x1, y1, y1_true, deg=20, title="f_exp(x)")
+
+# 高阶 + 岭：轻度正则化可改善病态，但会引入偏差
+fit_and_plot(x1, y1, y1_true, deg=20, ridge_lambda=1e-6, title="f_exp(x)")
+```
+
+
+### 实验 2：比较三种方法对 `f_abs(x)` 生成数据的拟合效果
+
+```{python}
+# | code-fold: true
+fit_and_plot(x2, y2, y2_true, deg=5,  title="f_abs(x)")
+fit_and_plot(x2, y2, y2_true, deg=20, title="f_abs(x)")
+```
+
+::: callout-tip
+高阶在端点、尖点附近更易震荡。**样条**常是更稳健替代（详见 [Lecture 3](./03_interpolation.html)）
+:::
+
+## 正交多项式
+
+
+### 换基：同一列空间，不同数值性
+
+最小二乘解逼近的是同一个函数空间。$\mathcal{P}_d=\mathrm{span}\{1,x,\dots,x^d\}$。**更换基函数无非是对这空间做线性变换**：
+
+若 $\{\phi_0,\dots,\phi_d\}$ 也是 $\mathcal{P}_d$ 的一组基，则
+$$
+p(x)=\sum_{k=0}^d c_k x^k=\sum_{k=0}^d \alpha_k \phi_k(x),\quad
+[\alpha]=T^{-1}[c].
+$$
+
+**函数 $p(x)$ 不变**，但数值性质（条件数、投影结构、算法稳定性）会随基的改变而天差地别。
+
+::: callout-tip
+用正交、局部、几何友好的基，能把难解的密集病态问题变成易解的对角、带状问题。
+:::
+
+### 正交多项式基
+
+把区间线性缩放到 $[-1,1]$。
+
+#### Chebyshev 基（I类）
+
+* 定义：$T_k(x)=\cos(k\arccos x)$，$k=0,1,\dots,d$。
+* 正交权：$\displaystyle \langle f,g\rangle=\int_{-1}^1 \frac{f(x)g(x)}{\sqrt{1-x^2}},dx$。
+* **数值优势**：
+
+  * 低振荡：截断 Chebyshev 级数常接近**极小极大**近似，边界抗 Runge。
+  * 若采样点/权重匹配相应的**离散正交**（如 Chebyshev 节点与合适权），则 $A^\top W A$ 近似**对角**。
+
+### Legendre 基
+
+* 定义：$P_k$ 是在 $[-1,1]$ 对权 $w(x)\equiv 1$ 正交的多项式。
+* 对均匀度量的 $\ell_2$ 最小二乘天然匹配，与 Gauss–Legendre 求积结合，用离散内积 $\sum w_i f(x_i)g(x_i)$ 近似连续内积时，**Gram 矩阵** $A^\top W A$ 接近对角。
+* 当均匀采样、希望全区间均衡逼近时考虑使用。
+
+### Bernstein/Bézier 基
+
+* 把区间归一到 $t\in[0,1]$，定义：
+  $$
+  B_{k,n}(t)=\binom{n}{k}t^k(1-t)^{n-k},\quad k=0,\dots,n
+  $$
+* **几何优势**：
+
+  * 非负且分割统一（$\sum_k B_{k,n}\equiv 1$）：曲线位于控制点凸包内，**无意外振荡**
+  * **de Casteljau 算法**评估数值稳定
+
+* 其局限是不正交，$A^\top A$ 不对角化；但在 $[0,1]$ 上的**形状保真**胜过单项式。
+* 当需要**形状可控、单调保凸**的拟合与几何设计（UI 曲线、参数化轮廓等）时考虑使用
+
+
+### 小结
+
+* **正规方程**需要形成 $A^\top A$ 和 $A^\top y$，代价 $O(n d^2 + d^3)$，但**病态平方**
+* **QR（GS/Householder）**代价相近，**更稳定**；Householder 通常优于 GS
+* **基函数选择**：单项式基在远离 $[0,1]$ 或高阶时更病态，可做中心化或缩放 $x$，或用正交多项式（如 Chebyshev）。换基就是换数值几何。
+
+
+## 课后作业
+
+### a4-1（必做）：计算
+
+共享单车出行，就算只骑 200 米，也有等红灯和解锁的时间。已知某学生采集到的骑行距离和用时的数据分别如下
+
+```python
+x = [0.5, 0.8, 1.0, 1.3, 
+1.8, 2.0, 2.2, 2.5, 
+3.0, 3.2, 3.8, 4.0]  # 距离(km)
+
+y = [4.6, 6.1, 7.1, 8.4, 
+10.9, 12.2, 13.0, 14.7, 
+16.8, 18.2, 21.2, 21.8]  # 时间(min)
+```
+
+用线性（一阶）拟合“距离”与“用时”的函数关系，并解释截距的物理意义。
+
+### a4-2（必做）：计算
+
+如果已知数据点 $(x_i,y_i)$ 和权 $w_i (i=1,2,\dots,m)$，我们可以构造带权 $\{w_i\}_{i=1}^m$ 的正交多项式，其递推关系满足：
+
+$$\begin{align*}
+&p_0(x)=1\\
+&p_1(x)=(x-\alpha_0)p_0(x)=x-\alpha_0\\
+&p_{k+1}(x)=(x-\alpha_k)p_k(x)-\beta_{k-1}p_{k-1}(x)
+\end{align*}$$
+
+其中
+
+$$\begin{align*}
+&\alpha_k=\frac{\displaystyle\sum_{i=1}^mw_ix_ip_k^2(x_i)}{\displaystyle\sum_{i=1}^mw_ip_k^2(x_i)},\quad &k=0,1,\dots,n\\
+&\beta_{k-1}=\frac{\displaystyle\sum_{i=1}^mw_ip_k^2(x_i)}{\displaystyle\sum_{i=1}^mw_ip_{k-1}^2(x_i)},\quad &k=1,2,\dots,n
+\end{align*}$$
+
+取正交多项式 $p_0(x),p_1(x),\dots,p_n(x)$，正规方程化简为 $$\langle p_k,p_k\rangle a_k=\langle y,p_k\rangle,\quad k=0,1,\dots,n$$ 那么 $n$ 次多项式 $P_n(x)=\displaystyle\sum_{k=0}^na_kp_k(x)$ 就是给定的数据集 $\{(x_i,y_i)\}_{i=1}^m$ 的最小二乘拟合。
+
+今有数据点 $(x_i,y_i)$ 和权 $w_i$ 如下表所示。用二次多项式以最小二乘法拟合这组数据。
+
+|$x_i$ | 0 | 0.5  | 0.6  | 0.7  | 0.8  | 0.9  | 1.0  |
+|--|--|--|--|--|--|--|--|
+|$y_i$ | 1 | 1.75 | 1.96 | 2.19 | 2.44 | 2.71 | 3.00 |
+|$w_i$ | 1 | 1    | 1    | 1    | 1    | 1    | 1    |
+
+
+## 附录：用 `grad` 直接最小化 $\tfrac12\|Ac-y\|_2^2$
+
+> 可选：若已安装 **JAX（CPU，64-bit）**，可用自动微分配合简单回溯线搜索做“无显式解”的最小化，并与 QR 解比对。
+
+```{python}
+try:
+    import jax, jax.numpy as jnp
+    jax.config.update("jax_enable_x64", True)
+
+    def vander_jax(x, deg):
+        x = jnp.asarray(x, dtype=jnp.float64)
+        n = x.size
+        A = jnp.ones((n, deg+1), dtype=jnp.float64)
+        def body(k, A):
+            return A.at[:,k].set(A[:,k-1]*x)
+        A = jax.lax.fori_loop(1, deg+1, body, A)
+        return A
+
+    def gd_least_squares(x, y, deg, it=200, c0=None):
+        x = jnp.asarray(x); y = jnp.asarray(y)
+        A = vander_jax(x, deg)
+        if c0 is None:
+            c = jnp.zeros((deg+1,), dtype=jnp.float64)
+        else:
+            c = jnp.asarray(c0, dtype=jnp.float64)
+
+        def loss(c):
+            r = A @ c - y
+            return 0.5*jnp.vdot(r, r).real
+
+        grad = jax.grad(loss)
+
+        @jax.jit
+        def step(c):
+            g = grad(c)
+            # 简单回溯（Armijo 风格）
+            lam = 1.0
+            phi0 = loss(c)
+            dir = -g
+            def cond(state):
+                lam, c, phi0 = state
+                c_try = c + lam*dir
+                return loss(c_try) > phi0 - 1e-4*lam*jnp.vdot(g, g).real
+            def body(state):
+                lam, c, phi0 = state
+                return (lam*0.5, c, phi0)
+            lam = jax.lax.while_loop(cond, body, (lam, c, phi0))[0]
+            return c + lam*dir
+
+        for _ in range(it):
+            c = step(c)
+        return np.array(c)
+
+    # 对比 exp(x), deg=12
+    deg = 12
+    c_qr = ls_via_qr_mgs(x1, y1, deg)[0]
+    c_gd = gd_least_squares(x1, y1, deg, it=200)
+
+    xs = np.linspace(0,1,1000)
+    plt.figure(figsize=(6,3.5))
+    plt.plot(xs, np.exp(xs), 'k-', lw=1, label='true')
+    plt.plot(xs, polyval_monomial(c_qr, xs), '--', label='QR')
+    plt.plot(xs, polyval_monomial(c_gd, xs), ':',  label='grad-descent')
+    plt.scatter(x1, y1, s=10, alpha=0.4, label='data')
+    plt.title("JAX-grad 直接最小化 vs QR")
+    plt.legend(); plt.grid(True, alpha=0.3); plt.tight_layout(); plt.show()
+
+except Exception as e:
+    print("JAX not available or skipped:", e)
+```
+
+**说明**
+
+* `grad` 给出 $\nabla_c \tfrac12\|Ac-y\|^2 = A^\top (Ac-y)$，GD 在理论上会收敛到正规方程解；
+* 实务中用更好的优化器（如 CG/LSQR 或二阶法）更高效，库的 `lstsq`/`polyfit` 已做了优化。
+

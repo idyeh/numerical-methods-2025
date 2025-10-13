@@ -173,12 +173,12 @@ def newton_eval(x_nodes, coef, x):
 ```
 
 ## 重心公式推导
-从拉格朗日形式起步。把 $\ell_i(x)$ 重写为
+从拉格朗日型起步。把 $\ell_i(x)$ 重写为
 
 $$
-\ell_i(x)=\frac{\prod_{j\ne i}(x-x_j)}{\prod_{j\ne i}(x_i-x_j)}
-=\frac{\prod_{j=0}^{n}(x-x_j)}{x-x_i}\cdot
-\underbrace{\frac{1}{\prod_{j\ne i}(x_i-x_j)}}_{w_i}
+\ell_i(x)=\frac{\displaystyle\prod_{j\ne i}(x-x_j)}{\displaystyle\prod_{j\ne i}(x_i-x_j)}
+=\frac{\displaystyle\prod_{j=0}^{n}(x-x_j)}{x-x_i}\cdot
+\underbrace{\frac{1}{\displaystyle\prod_{j\ne i}(x_i-x_j)}}_{w_i}
 $$
 
 记 $w_i:=\bigl(\prod_{j\ne i}(x_i-x_j)\bigr)^{-1}$。于是
@@ -213,7 +213,7 @@ $$
 * **第二重心公式**：对某些节点（如切比雪夫）选择**简洁权重**，数值更稳定。
 * **要点**：
 
-  * 若 $x$ 恰等于某个 $x_k$，直接返回 $y_k$（避免 0/0）。
+  * 若 $x$ 恰好等于某个 $x_k$，直接返回 $y_k$（避免 `0/0`）。
   * 预计算权重 $w_i$ 的**代价 $O(n^2)$**，单点求值 $O(n)$。
 
 ### 重心法的实现
@@ -388,25 +388,26 @@ $$
 其中 $x_j^{[-1,1]}$ 取一类或二类切比雪夫节点即可。
 
 
-### 重心插值的“第二公式权重”与实现要点
-- 二类节点的**闭式权重**，幅度有界、交替符号：
-  $$
+### 第二重心公式实现要点
+二类节点的**闭式权重**，幅度有界、交替符号：
+$$
   w_j=
   \begin{cases}
   \tfrac12(-1)^j, & j=0\ \text{或}\ j=n,\\
   (-1)^j, & \text{否则}.
   \end{cases}
-  $$
+$$
 
-  用它代入重心公式
-  $$
+用它代入重心公式
+$$
   p_n(x)=\frac{\sum\limits_{j=0}^n \dfrac{w_j\,y_j}{x-x_j}}
                {\sum\limits_{j=0}^n \dfrac{w_j}{x-x_j}},
-  $$
+$$
 
-  **更具数值稳定性**，且无需再做 $O(n^2)$ 的通用权重预处理。
+**更具数值稳定性**，且无需再做 $O(n^2)$ 的通用权重预处理。
+
 - 一类节点的闭式权重也很简洁：$w_j = (-1)^j$，所有点同模长。  
-- 若 $x$ 与某个 $x_k$**恰等**，直接返回 $y_k$（避免 0/0）。批量求值时可先做相等掩码。
+- 若 $x$ 与某个 $x_k$**恰好相等**，直接返回 $y_k$（避免 `0/0`）。批量求值时可先做相等掩码。
 
 
 ### 比较实验
@@ -521,7 +522,7 @@ def bary_weights_cheb_lobatto(n):
 xs = np.linspace(-1, 1, 2001)
 orders = [4, 8, 12, 16]
 
-fig, axes = plt.subplots(len(orders), 2, figsize=(10, 10), sharex=True, sharey=True)
+fig, axes = plt.subplots(len(orders), 2, figsize=(8, 8), sharex=True, sharey=True)
 for r, n in enumerate(orders):
     # 等距
     xe = nodes_equidistant(-1, 1, n)
@@ -934,11 +935,10 @@ $$
 
 使用函数 $\displaystyle \mathrm{sinc}_\pi(x)=\frac{\sin(\pi x)}{\pi x}$（在 $x=0$ 处定义为 1）。  
 
-- 目的：在同一节点与同一求值网格上，比较 **NumPy** 与 **JAX（CPU, 64-bit, `jit`+`vmap`）** 的 **重心插值**效果与性能。同时对比等距节点与第二类切比雪夫节点。
+- 目的：在同一节点与同一求值网格上，比较 **NumPy** 与 **JAX** 的 **重心插值**效果与性能。同时对比等距节点与第二类切比雪夫节点。
 - 要点：
   - JAX 版本采用**通用权重** $w_i = 1/\prod_{j\ne i}(x_i-x_j)$ 的 O($n^2$) 实现；  
-  - 求值阶段使用 `vmap` 批量化 + `jit` 编译，避免 Python 循环；  
-  - 64-bit 开启：`jax.config.update("jax_enable_x64", True)`；  
+  - 求值阶段使用 `vmap` 批量化 + `jit` 编译，避免 Python 循环；
   - 结果与 NumPy 版在数值上应一致（到浮点 10⁻¹⁴～10⁻¹⁵ 量级）。
 
 ### 代码：NumPy 版
@@ -1119,7 +1119,7 @@ else:
     print()
 
 # 画图
-fig, axes = plt.subplots(2, 2, figsize=(11, 6), sharex="col")
+fig, axes = plt.subplots(2, 2, figsize=(8, 5), sharex="col")
 
 # 上：插值曲线
 axes[0, 0].plot(xs, fx, label="f(x)=sinc_π(x)")
