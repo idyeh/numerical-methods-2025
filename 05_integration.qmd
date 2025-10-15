@@ -1,0 +1,720 @@
+---
+title: "数值积分"
+---
+
+## 学习目标
+
+* 从 **Riemann 和插值**两种角度推导基本求积公式（矩形、梯形、Simpson），掌握**复化**思想与**误差阶**。
+* 会用**Richardson 外推**提升阶数，理解并实现 **Romberg** 表。
+* 对“**步长–误差**关系”有清晰的认知。
+* 掌握 **Gauss 求积**的构造与使用场景。
+* 理解 **Monte Carlo** 求积的思想。
+
+
+## 动机与思路
+
+计算曲线下面积：
+$$
+I=\int_a^b f(x)\,dx
+$$
+
+* **Newton–Cotes**：在每个小区间用**低次多项式插值** $p(x)$ 逼近 $f(x)$，然后**积分 $p(x)$**。
+* **外推加速**：若 $I(h)=I + C h^p + o(h^p)$，设法用不同步长组合消去主误差项。
+* **Gauss 求积**：用**最优节点**（正交多项式的零点）让阶数从 $n$ 步直接提升到 $2n-1$ 次**代数精度**。
+* **Monte Carlo**：高维时确定性方法“爆炸”，MC 误差不依赖维度（但收敛慢）。
+
+
+## 符号约定
+
+* 将区间 $[a,b]$ 等分为 $n$ 段，步长 $h=\frac{b-a}{n}$，节点 $x_i=a+ih$。
+* 复化规则一般形如 $\displaystyle Q_h=\sum_{i=0}^n w_i f(x_i)$ 或每小段做子规则累加。
+* **精度阶**：若 $|I-Q_h|\le C h^p$，称该规则全局误差阶为 $p$。
+
+
+# 一、基本规则与误差
+
+## 矩形规则与梯形规则
+
+```{python}
+# | code-fold: true
+import numpy as np
+import matplotlib.pyplot as plt
+
+plt.rcParams["font.sans-serif"] = ["PingFang SC", "Arial Unicode MS"]
+plt.rcParams["axes.unicode_minus"] = False
+
+# 单段区间 [xi, xi1] 与示意函数（取凸函数便于观察）
+f = np.exp
+xi, xi1 = 0.0, 1.0
+xm = 0.5 * (xi + xi1)
+
+xs = np.linspace(xi - 0.15, xi1 + 0.15, 400)
+ys = f(xs)
+
+fig, axes = plt.subplots(3, 1, figsize=(3.2, 6.0), sharex=True)
+
+
+# 共有元素：曲线与区间边界
+def common(ax, title):
+    ax.plot(xs, ys, lw=1.2, label="f(x)")
+    ax.axvline(xi, color="k", lw=0.8, alpha=0.7)
+    ax.axvline(xi1, color="k", lw=0.8, alpha=0.7)
+    ax.set_xlim(xs.min(), xs.max())
+    ax.set_ylim(0.9 * f(xi), 1.1 * f(xi1))
+    ax.set_title(title, fontsize=10)
+    ax.grid(True, alpha=0.3)
+
+
+# 左矩形
+ax = axes[0]
+common(ax, r"左矩形：取 $f(x_i)$")
+ax.hlines(f(xi), xi, xi1, colors="C1", lw=2)
+ax.plot([xi], [f(xi)], "o", color="C1")
+ax.fill_between([xi, xi1], [0, 0], [f(xi), f(xi)], alpha=0.15, color="C1")
+
+# 右矩形
+ax = axes[1]
+common(ax, r"右矩形：取 $f(x_{i+1})$")
+ax.hlines(f(xi1), xi, xi1, colors="C2", lw=2)
+ax.plot([xi1], [f(xi1)], "o", color="C2")
+ax.fill_between([xi, xi1], [0, 0], [f(xi1), f(xi1)], alpha=0.15, color="C2")
+
+# 中点矩形
+ax = axes[2]
+common(ax, r"中点矩形：取 $f((x_i+x_{i+1})/2)$")
+ax.hlines(f(xm), xi, xi1, colors="C3", lw=2)
+ax.plot([xm], [f(xm)], "o", color="C3")
+ax.fill_between([xi, xi1], [0, 0], [f(xm), f(xm)], alpha=0.15, color="C3")
+
+plt.tight_layout()
+plt.show()
+```
+
+* **矩形（Rectangular）**：$\displaystyle \int_{x_i}^{x_{i+1}} f(x)\,dx \approx h\, f(\xi)$（$\xi$ 取左、或右、或中）。
+
+  * **左**：$Q^{\text{L}}=\displaystyle\sum_{i=0}^{n-1} h\,f(x_i)$（全局 $O(h)$）。
+  * **右**：$Q^{\text{R}}=\displaystyle\sum_{i=1}^{n}   h\,f(x_i)$（全局 $O(h)$）。
+  * **中点**：$Q^{\text{M}}=\displaystyle\sum_{i=0}^{n-1} h\,f\bigl(\tfrac{x_i+x_{i+1}}{2}\bigr)$（全局 $O(h^2)$）。
+* **梯形（Trapezoidal）**：把 $f$ 在段内**线性插值**，积分得
+  $$
+  \boxed{~Q^{\text{T}}=\frac{h}{2}\bigl(f(a)+2\sum_{i=1}^{n-1}f(x_i)+f(b)\bigr), \quad |I-Q^{\text{T}}| \le C,h^2.~}
+  $$
+
+> **误差来源（泰勒）**：在单段 $[x_i,x_{i+1}]$ 展开 $f$ 到二阶，积分后得到
+> $\displaystyle E^{\text{T}}_i = -\frac{h^3}{12} f''(\xi_i)$。累加得全局 $O(h^2)$。
+
+
+## Simpson
+
+* 在 $[x_{2k},x_{2k+2}]$ 三点做二次插值，积分得
+  $$
+  \boxed{~Q^{\text{S}}=\frac{h}{3}\Bigl(f(x_0)+4\sum_{j\text{为奇}} f(x_j)+2\sum_{\substack{j\text{为偶}\\ 0<j<n}} f(x_j)+f(x_n)\Bigr),~~n~\text{偶数}.~}
+  $$
+* 误差项（单段）$\displaystyle E=-\frac{(b-a)^5}{2880} f^{(4)}(\xi)$，复化全局 $O(h^4)$。
+
+
+## 代码实现
+
+```{python}
+import numpy as np
+
+def composite_left(f, a, b, n):
+    x = np.linspace(a, b, n+1)
+    h = (b-a)/n
+    return h * np.sum(f(x[:-1]))
+
+def composite_right(f, a, b, n):
+    x = np.linspace(a, b, n+1)
+    h = (b-a)/n
+    return h * np.sum(f(x[1:]))
+
+def composite_midpoint(f, a, b, n):
+    h = (b-a)/n
+    x_mid = a + (np.arange(n)+0.5)*h
+    return h * np.sum(f(x_mid))
+
+def composite_trapezoid(f, a, b, n):
+    x = np.linspace(a, b, n+1)
+    h = (b-a)/n
+    y = f(x)
+    return h * (0.5*y[0] + np.sum(y[1:-1]) + 0.5*y[-1])
+
+def composite_simpson(f, a, b, n):
+    assert n % 2 == 0, "Simpson 需要偶数 n"
+    x = np.linspace(a, b, n+1)
+    h = (b-a)/n
+    y = f(x)
+    S_odd  = np.sum(y[1:-1:2])
+    S_even = np.sum(y[2:-1:2])
+    return (h/3) * (y[0] + 4*S_odd + 2*S_even + y[-1])
+```
+
+## 误差–步长关系的数值实验
+
+```{python}
+import matplotlib.pyplot as plt
+
+
+def test_convergence(f, I_exact, a, b, ns):
+    err_T, err_S, err_M = [], [], []
+    hs = []
+    for n in ns:
+        h = (b - a) / n
+        hs.append(h)
+        T = composite_trapezoid(f, a, b, n)
+        M = composite_midpoint(f, a, b, n)
+        S = composite_simpson(f, a, b, n if n % 2 == 0 else n + 1)
+        err_T.append(abs(I_exact - T))
+        err_M.append(abs(I_exact - M))
+        err_S.append(abs(I_exact - S))
+    hs, err_T, err_M, err_S = map(np.array, (hs, err_T, err_M, err_S))
+
+    plt.figure(figsize=(6, 4))
+    plt.loglog(hs, err_T, "-o", label=r"Trapezoid ~ $h^2$")
+    plt.loglog(hs, err_M, "-o", label=r"Midpoint ~ $h^2$")
+    plt.loglog(hs, err_S, "-o", label=r"Simpson ~ $h^4$")
+    plt.loglog(hs, hs**2 * err_T[0] / hs[0] ** 2, ":", label=r"~ $h^2$ ref")
+    plt.loglog(hs, hs**4 * err_S[0] / hs[0] ** 4, ":", label=r"~ $h^4$ ref")
+    plt.gca().invert_xaxis()
+    plt.xlabel("h")
+    plt.ylabel("abs error")
+    plt.grid(True, which="both", alpha=0.3)
+    plt.legend()
+    plt.title("步长-误差关系（平滑 f）")
+    plt.tight_layout()
+    plt.show()
+
+
+# 平滑函数：f(x)=exp(x), ∫_0^1 e^x dx = e-1
+f = np.exp
+a, b = 0.0, 1.0
+I = np.e - 1.0
+ns = [10, 20, 40, 80, 160, 320]
+test_convergence(f, I, a, b, ns)
+```
+
+::: callout-note
+若 $f$ **不够光滑**（如 $|x|$ 的尖点），阶数会下降，此外端点奇异也会破坏高阶。
+:::
+
+# 二、外推与加速
+
+## Richardson 外推
+
+目的是消去主误差项，设某规则 $Q(h)=I + C h^p + o(h^p)$。则
+$$
+\boxed{~Q^{\text{Rich}}(h)=\frac{2^p Q(h/2)-Q(h)}{2^p-1} = I + o(h^p)~}
+$$
+
+* 对于**梯形**，$p=2$。对于 Simpson 再外推也可到达更高阶。
+* 关键要已知（或估计）该规则的**主阶 $p$**。
+
+### 代码：对梯形规则做 Richardson
+
+```{python}
+def richardson_trap(f, a, b, n):
+    # 用 n 与 2n 两个梯形值做一次外推
+    T1 = composite_trapezoid(f, a, b, n)
+    T2 = composite_trapezoid(f, a, b, 2*n)
+    return (4*T2 - T1)/3  # p=2
+```
+
+
+## Romberg 积分
+
+* 先构造步长序列 $h_k=(b-a)/2^k$，算 $T_{k,0}=$ 梯形值。
+* 递推做**多次外推**：
+  $$
+  \boxed{~T_{k,j} = T_{k,j-1} + \frac{T_{k,j-1}-T_{k-1,j-1}}{4^j-1},\quad j=1,2,\dots~}
+  $$
+
+* 此表右上角收敛很快，对足够平滑的 $f$，Romberg 高效又稳健
+
+### 代码：Romberg 表
+
+```{python}
+def romberg(f, a, b, K=6):
+    T = np.zeros((K, K), dtype=np.float64)
+    # T[0,0]
+    T[0,0] = 0.5*(b-a)*(f(a)+f(b))
+    # 递推 T[k,0]
+    for k in range(1, K):
+        n = 2**k
+        h = (b-a)/n
+        # 新增的中点求和
+        xs = a + (np.arange(1, n, 2))*h
+        T[k,0] = 0.5*T[k-1,0] + h*np.sum(f(xs))
+        # 外推
+        for j in range(1, k+1):
+            T[k,j] = T[k,j-1] + (T[k,j-1]-T[k-1,j-1])/(4**j - 1)
+    return T
+
+# 演示
+T = romberg(np.exp, 0.0, 1.0, K=6)
+print("Romberg table (exp on [0,1]):")
+print(np.round(T, 12))
+print("Best:", T[-1, -1], " vs exact:", np.e-1)
+```
+
+
+# 三、Gauss 求积
+
+## 代数精度
+
+如果求积公式对于次数不大于 $m$ 的多项式均能确保其**误差为零**，但不保证对 $m+1$ 次多项式的误差为零，则称该求积公式具有 $m$ 阶**代数准确度**或**精度**。
+
+数值求积**寻找**满足 $\displaystyle\int_a^bf(x){\,\rm{d}}x\approx\sum_{i=0}^na_if(x_i)$ 的 $a_i$ 和 $x_i$，可以视为确定未知参数的代数问题。
+
+例：用求积公式 $$a_0f(x_0)+a_1f(x_1)$$ 近似计算积分 $$I(f)=\int_{-1}^1f(x){\,\rm{d}}x$$ 为使求积公式的代数准确度为 3，确定系数 $a_i$ 和节点 $x_i$，其中 $i=0,1$。一般地，欲使求积公式具有 $m$ 阶精度，只要令它对于 $f(x)=1,x,x^2,\dots,x^m$ 均成立。因此
+
+$$
+\begin{align*}
+&a_0 + a_1 =I(1)= \int_{-1}^1 {\,\rm{d}}x=2\\
+&a_0x_0 + a_1x_1 =I(x)= \int_{-1}^1 x{\,\rm{d}}x=0\\
+&a_0x_0^2 + a_1x_1^2 =I(x^2)= \int_{-1}^1 x^2{\,\rm{d}}x=\frac{2}{3}\\
+&a_0x_0^3 + a_1x_1^3 =I(x^3)= \int_{-1}^1 x^3{\,\rm{d}}x=0
+\end{align*}
+$$
+
+结果是 $x_0=-\displaystyle\frac{1}{\sqrt{3}},x_1=\displaystyle\frac{1}{\sqrt{3}},a_0=a_1=1$。
+
+## 核心思想
+
+* 用 $n$ 个点和权重，使对**所有 $2n-1$ 次及以下多项式**积分**精确**。
+* 节点取**正交多项式**的零点（Legendre 权函数 $w(x)=1$；Chebyshev 则是 $w(x)=1/\sqrt{1-x^2}$）。
+
+::: callout-note
+正交多项式和 Langrange 插值的证明
+
+ 设对权函数 $\rho(x)$ 的**正交多项式族** $\{P_k\}$，取**节点为 $P_n$ 的零点** $\{x_i\}$。对任意 $p\in \Pi_{2n-1}$，作多项式除法
+ $$
+ p(x)=q(x)P_n(x)+r(x),\quad \deg r\le n-1.
+ $$
+
+ 于是
+ $$
+ \int \rho\,p = \int \rho\,r + \underbrace{\int \rho\,q P_n}
+ \quad(\text{正交性})
+ $$
+
+ 又因 $P_n(x_i)=0$，有 $\sum w_i p(x_i)=\sum w_i r(x_i)$。若定义
+ $$
+ w_i \equiv \int_a^b \rho(x)\,\ell_i(x),dx,\qquad
+ \ell_i(x)=\prod_{j\ne i}\frac{x-x_j}{x_i-x_j},
+ $$
+
+ 则插值多项式 $r$（$\deg\le n-1$）满足
+ $\displaystyle r(x)=\sum r(x_i)\ell_i(x)\Rightarrow \int \rho\,r = \sum w_i r(x_i)$。
+ 故对所有 $\deg p\le 2n-1$ 精确，这就是 **Gauss 求积**。
+
+**权重闭式**有 Gauss–Legendre、Gauss–Chebyshev I。
+:::
+
+## Gauss–Legendre
+
+Gauss–Legendre 需要做 $[-1,1]$ 到 $[a,b]$ 的映射。
+
+* 用 `numpy.polynomial.legendre.leggauss(n)` 取得 $(x_i,w_i)$ 于 $[-1,1]$。
+* 映射到 $[a,b]$：$x=\frac{b-a}{2}t+\frac{a+b}{2},\quad w=\frac{b-a}{2},\omega$。
+
+### 代码：Gauss–Legendre 求积
+
+```{python}
+from numpy.polynomial.legendre import leggauss
+
+def gauss_legendre(f, a, b, n):
+    t, w = leggauss(n)   # t in [-1,1]
+    x = (b-a)/2 * t + (a+b)/2
+    wx = (b-a)/2 * w
+    return np.sum(wx * f(x))
+
+# 示例：∫_0^π sin(x) dx = 2
+I_gl_4 = gauss_legendre(np.sin, 0.0, np.pi, n=4)
+print("Gauss-Legendre n=4:", I_gl_4, "  exact:", 2.0)
+```
+
+## Gauss–Chebyshev
+
+Gauss–Chebyshev I，权 $1/\sqrt{1-x^2}$。
+
+* 节点与权重（闭式）：
+  $$
+  x_k=\cos\frac{2k-1}{2n}\pi,\quad w_k=\frac{\pi}{n},\quad k=1,\dots,n.
+  $$
+
+* 适用于 $\displaystyle \int_{-1}^1 \frac{f(x)}{\sqrt{1-x^2}}\,dx$。若要算一般 $\int_{-1}^1 f(x)\,dx$，需**配权变换**。
+
+### 代码：Gauss–Chebyshev加权积分
+
+```{python}
+def gauss_chebyshev_1st_weighted(f, n):
+    k = np.arange(1, n+1)
+    x = np.cos((2*k-1)*np.pi/(2*n))
+    w = np.pi/n
+    return np.sum(w * f(x))
+
+# 验证：∫_{-1}^1 dx/√(1-x^2) = π
+val = gauss_chebyshev_1st_weighted(lambda x: 1.0, n=8)
+print("Gauss-Chebyshev (w=1/√(1-x^2)):", val, " exact π:", np.pi)
+```
+
+> **建议**：一般函数在有限区间上，优先用 **Gauss–Legendre**。带已知权函数时选择相应**Gauss–$x$** 族（$x=$Laguerre, Hermite, Chebyshev 等）。
+
+
+# 四、Monte Carlo 求积
+
+## 思想
+
+* 把积分当做**期望**：$\displaystyle I=\int_a^b f(x)\,dx=(b-a)\,\mathbb{E}_{U\sim\mathcal{U}(a,b)}[f(U)]$。
+* 估计：$\displaystyle \hat I_N=\frac{b-a}{N}\sum_{k=1}^N f(U_k)$。
+* 方差：$\mathrm{Var}[\hat I_N]=\frac{(b-a)^2}{N}\mathrm{Var}[f(U)]$，**RMSE $\sim N^{-1/2}$**，与维度无关。
+
+## 二重积分的例子
+
+$$
+I=\iint_{[0,1]^2} e^{x+y},dx,dy = \bigl(\int_0^1 e^x dx\bigr)^2 = (e-1)^2
+$$
+
+用**张量积**思想把 1D 规则扩展到 2D：权重外积即可。
+
+```{python}
+import numpy as np
+
+def trap2d(f, ax, bx, ay, by, nx, ny):
+    x = np.linspace(ax, bx, nx+1); y = np.linspace(ay, by, ny+1)
+    hx, hy = (bx-ax)/nx, (by-ay)/ny
+    X, Y = np.meshgrid(x, y, indexing="xy")
+    Z = f(X, Y)
+    # 1D 梯形权重
+    wx = np.ones_like(x); wx[0]=wx[-1]=0.5
+    wy = np.ones_like(y); wy[0]=wy[-1]=0.5
+    W = np.outer(wy, wx)  # 2D 权重 = 外积
+    return hx*hy*np.sum(W*Z)
+
+def simpson2d(f, ax, bx, ay, by, nx, ny):
+    # nx, ny 需为偶数
+    if nx % 2: nx += 1
+    if ny % 2: ny += 1
+    x = np.linspace(ax, bx, nx+1); y = np.linspace(ay, by, ny+1)
+    hx, hy = (bx-ax)/nx, (by-ay)/ny
+    X, Y = np.meshgrid(x, y, indexing="xy")
+    Z = f(X, Y)
+    # 1D Simpson 权重：1,4,2,4,...,2,4,1
+    def w_simpson(n):
+        w = np.ones(n+1)
+        w[1:n:2] = 4; w[2:n-1:2] = 2
+        return w
+    wx = w_simpson(nx); wy = w_simpson(ny)
+    W = np.outer(wy, wx)
+    return (hx*hy/9.0)*np.sum(W*Z)  # (hx/3)*(hy/3) = hx*hy/9
+
+# 对比
+f2 = lambda X,Y: np.exp(X+Y)
+I_exact = (np.e - 1.0)**2
+Q_tr = trap2d(f2, 0.0, 1.0, 0.0, 1.0, nx=64, ny=64)
+Q_sp = simpson2d(f2, 0.0, 1.0, 0.0, 1.0, nx=64, ny=64)
+print("2D trapezoid :", Q_tr, "  err =", abs(Q_tr - I_exact))
+print("2D Simpson   :", Q_sp, "  err =", abs(Q_sp - I_exact))
+print("Exact        :", I_exact)
+```
+
+
+## 代码示例：MC 收敛一维曲线
+
+```{python}
+rng = np.random.default_rng(0)
+
+def mc_integrate(f, a, b, N, reps=30):
+    # 多次独立重复，估计 RMSE
+    vals = []
+    I_exact = 2.0  # 例：∫_0^π sin(x) dx
+    for _ in range(reps):
+        U = rng.uniform(a, b, size=N)
+        vals.append((b-a)*np.mean(f(U)))
+    vals = np.array(vals)
+    rmse = np.sqrt(np.mean((vals - I_exact)**2))
+    return rmse
+
+Ns = [200, 500, 1000, 2000, 5000, 10000, 20000]
+rmses = [mc_integrate(np.sin, 0.0, np.pi, N) for N in Ns]
+
+plt.figure(figsize=(6,4))
+plt.loglog(Ns, rmses, '-o', label='MC RMSE ~ N^{-1/2}')
+plt.loglog(Ns, rmses[0]*(np.array(Ns)/Ns[0])**(-0.5), ':', label='ref slope -1/2')
+plt.xlabel("N"); plt.ylabel("RMSE"); plt.grid(True, which='both', alpha=0.3)
+plt.legend(); plt.title("Monte Carlo 求积收敛率"); plt.tight_layout(); plt.show()
+```
+
+> 在**低维平滑**问题，确定性高阶法（如 Gauss、Romberg）远优于 MC。但在**高维**或**复杂域**时，MC 的维度无关性与易并行性成为优势。
+
+## 回到二维的例子
+
+把 $\displaystyle I=\iint_{[0,1]^2} e^{x+y},dx,dy$ 写成 $\mathbb{E}[e^{U+V}]$（$U,V\sim\mathcal{U}(0,1)$ 独立），
+ 估计量 $\hat I_N=\frac{1}{N}\displaystyle\sum_{k=1}^N e^{U_k+V_k}$，RMSE $\sim N^{-1/2}$。
+
+```{python}
+import numpy as np
+
+rng = np.random.default_rng(123)
+
+
+def mc_integrate_2d_unit(f, N):
+    U = rng.random(N)
+    V = rng.random(N)  # 独立 U(0,1)
+    return np.mean(f(U, V))
+
+
+f2 = lambda U, V: np.exp(U + V)
+I_exact = (np.e - 1.0) ** 2
+
+for N in [1_000, 5_000, 20_000, 100_000]:
+    ests = [mc_integrate_2d_unit(f2, N) for _ in range(10)]
+    mean_est = float(np.mean(ests))
+    rmse = float(np.sqrt(np.mean((np.array(ests) - I_exact) ** 2)))
+    print(
+        f"N={N:6d}  MC mean={mean_est:.8f}  RMSE≈{rmse:.3e}  |bias|≈{abs(mean_est - I_exact):.3e}"
+    )
+```
+
+# 五、综合对比与实践建议
+
+## 方法速览
+
+* **复化梯形/中点**：简单、二阶，适合快速基线。
+* **复化 Simpson**：四阶，平滑函数上性价比高。
+* **Richardson/Romberg**：自动阶提升与误差控制，适合一维高精度。
+* **Gauss–Legendre**：对多项式、平滑函数极高效率。
+* **Monte Carlo**：高维、复杂区域、黑箱函数的首选，可与方差缩减（重要性采样、分层）技术结合。
+
+## 代码示例与比较
+
+### 统一接口的封装
+
+```{python}
+def integrate(f, a, b, method="trap", n=100, richardson=False, rombergK=None, gl_n=None):
+    if method=="trap":
+        Q = composite_trapezoid(f, a, b, n)
+        if richardson:
+            Q = (4*composite_trapezoid(f, a, b, 2*n) - Q)/3
+        return Q
+    elif method=="mid":
+        return composite_midpoint(f, a, b, n)
+    elif method=="simpson":
+        n = n if n%2==0 else n+1
+        return composite_simpson(f, a, b, n)
+    elif method=="romberg":
+        K = rombergK or 6
+        return romberg(f, a, b, K=K)[-1, -1]
+    elif method=="gauss-legendre":
+        assert gl_n is not None and gl_n>=1
+        return gauss_legendre(f, a, b, gl_n)
+    elif method=="mc":
+        U = np.random.default_rng(0).uniform(a, b, size=n)
+        return (b-a)*np.mean(f(U))
+    else:
+        raise ValueError("unknown method")
+```
+
+## 方法比较
+
+```{python}
+# | code-fold: true
+import time
+
+# 待比较的被积函数（真值）
+FNS = [
+    {
+        "name": r"$\int_0^1 e^x\,dx$",
+        "a": 0.0,
+        "b": 1.0,
+        "f": np.exp,
+        "I": np.e - 1.0,
+    },
+    {
+        "name": r"$\int_0^{\pi/2} \cos x\,dx$",
+        "a": 0.0,
+        "b": np.pi / 2,
+        "f": np.cos,
+        "I": 1.0,
+    },
+    {
+        "name": r"$\int_{-1}^{1} |x|\,dx$",
+        "a": -1.0,
+        "b": 1.0,
+        "f": np.abs,
+        "I": 1.0,
+    },
+    {
+        "name": r"$\int_0^1 \sqrt{x}\,dx$",
+        "a": 0.0,
+        "b": 1.0,
+        "f": np.sqrt,
+        "I": 2.0 / 3.0,
+    },
+    {
+        "name": r"$\int_0^{\pi} \sin(20x)\,dx$",
+        "a": 0.0,
+        "b": np.pi,
+        "f": lambda x: np.sin(20.0 * x),
+        "I": 0.0,
+    },
+]
+
+# 数值积分方法
+METHODS = [
+    {"label": "Midpoint (复化)", "method": "mid", "kwargs": {"n": 256}},
+    {"label": "Trapezoid (复化)", "method": "trap", "kwargs": {"n": 256}},
+    {"label": "Simpson (复化)", "method": "simpson", "kwargs": {"n": 256}},
+    {
+        "label": "Richardson@Trap",
+        "method": "trap",
+        "kwargs": {"n": 128, "richardson": True},
+    },
+    {"label": "Romberg (K=6)", "method": "romberg", "kwargs": {"rombergK": 6}},
+    {
+        "label": "Gauss-Legendre (n=8)",
+        "method": "gauss-legendre",
+        "kwargs": {"gl_n": 8},
+    },
+    {"label": "Monte Carlo (N=5e4)", "method": "mc", "kwargs": {"n": 50_000}},
+]
+
+# 绘制子图矩阵
+rows = len(METHODS)
+cols = len(FNS)
+fig, axes = plt.subplots(
+    rows, cols, figsize=(3.2 * cols, 2.2 * rows), sharex=False, sharey=False
+)
+
+for r, M in enumerate(METHODS):
+    for c, G in enumerate(FNS):
+        ax = axes[r, c] if rows > 1 else axes[c]
+        f, a, b, I = G["f"], G["a"], G["b"], G["I"]
+
+        # 计算近似并计时
+        t0 = time.perf_counter()
+        Q = integrate(f, a, b, method=M["method"], **M["kwargs"])
+        t1 = time.perf_counter()
+        err = abs(Q - I)
+
+        # 画函数与区间阴影
+        xs = np.linspace(a, b, 800)
+        ys = f(xs)
+        ax.plot(xs, ys, lw=1.2)
+        ax.fill_between(xs, 0.0, ys, alpha=0.12)
+
+        # 注释：数值、误差、耗时
+        ax.text(
+            0.02,
+            0.98,
+            f"Q = {Q:.8g}\nI = {I:.8g}\n|err| = {err:.2e}\n{(t1 - t0) * 1e3:.1f} ms",
+            transform=ax.transAxes,
+            ha="left",
+            va="top",
+            fontsize=9,
+            bbox=dict(boxstyle="round,pad=0.25", facecolor="white", alpha=0.8, lw=0.5),
+        )
+
+        # 轴与标题
+        if r == 0:
+            ax.set_title(G["name"] + f"\n[{a:.2g}, {b:.2g}]", fontsize=11)
+        if c == 0:
+            ax.set_ylabel(M["label"], fontsize=10)
+        ax.grid(True, alpha=0.25)
+
+plt.tight_layout()
+plt.show()
+```
+
+## 实践小贴士
+
+* **缩放与变换**：把 $[a,b]$ 线性映射到 $[-1,1]$ 便于套用标准权重与库函数。
+* **光滑性检测**：若误差不按预测阶收敛，检查是否有尖点/端点奇异；考虑**分段积分**或**变换**（如端点开方奇异可令 $x=\phi(t)$，见作业2）。
+* **误差估计**：两级步长比较（$h$ vs $h/2$）即可给出**自适应**估计。
+
+
+## 小结
+
+* Newton–Cotes 给出**起步**与**直观**；
+* Richardson/Romberg 提供**自动阶提升**；
+* Gauss 求积在低维平滑问题上**效率高**；
+* Monte Carlo 在高维/复杂域上**维度友好**。
+
+::: callout-note
+理解它们的适用场景与误差行为，是现代数值计算工具选择的关键。
+:::
+
+# 课后作业
+
+### a5-1（必做）：编程
+用 Python 实现**自适应 Simpson**，并比较与固定步长的函数调用次数。
+
+> 提示：推荐写递归，堆栈亦可但需要手动维护栈。
+
+::: callout-tip
+**自适应 Simpson 算法伪代码**
+
+* `Simpson(fa, fm, fb, h) = h/6 * (fa + 4*fm + fb)`，其中 `h=b-a`、`fa=f(a)`, `fm=f((a+b)/2)`, `fb=f(b)`
+* 误差判据：$|S_L + S_R - S| \le 15 * tol$
+* 返回值采用 Richardson 修正：`S_L + S_R + (S_L + S_R - S)/15`
+
+```
+procedure AdaptiveSimpson(f, a, b, tol, max_depth):
+    stack ← empty
+    # 初始化：一次 3 点评估
+    m  ← (a + b)/2
+    fa ← f(a); fm ← f(m); fb ← f(b)
+    S  ← Simpson(fa, fm, fb, b - a)
+    push(stack, (a, fa, m, fm, b, fb, S, tol, depth=1))
+
+    Q_sum ← 0
+    while stack not empty:
+        (a, fa, m, fm, b, fb, S, tol, depth) ← pop(stack)
+        h   ← b - a
+        lm  ← (a + m)/2
+        rm  ← (m + b)/2
+        flm ← f(lm)
+        frm ← f(rm)
+
+        SL ← Simpson(fa, flm, fm, h/2)
+        SR ← Simpson(fm, frm, fb, h/2)
+        diff ← SL + SR - S
+
+        if (depth ≥ max_depth) or (abs(diff) ≤ 15 * tol):
+            Q_sum ← Q_sum + (SL + SR + diff/15)
+        else:
+            # 注意：先推右再推左，保证左段先被处理（LIFO）
+            push(stack, (m, fm, rm, frm, b, fb, SR, tol/2, depth+1))
+            push(stack, (a, fa, lm, flm, m, fm, SL, tol/2, depth+1))
+
+    return Q_sum
+```
+:::
+
+
+### a5-2（选做）：探索
+对 $\displaystyle\int_0^1 \sqrt{x}\,dx$ 在端点 $x=0$ 处的导数奇异点会让 Newton-Cotes 降阶。试不同变量代换（如 $x=t^2$）后再用 Simpson 或 Gauss-Legendre，比较误差阶的恢复。并编写**数值实验**验证你的结论。
+
+
+## 附：梯形公式误差的推导
+
+对 $f(x)$ 使用线性插值
+$$
+P_1(x)=\frac{(x-x_1)}{(x_0-x_1)}f(x_0)+\frac{(x-x_0)}{(x_1-x_0)}f(x_1)$$ 对其在 $[a,b]$ 上积分 $$\begin{align*}\int_a^b f(x){\rm{d}}x&=\int_{x_0}^{x_1}\left[\frac{(x-x_1)}{(x_0-x_1)}f(x_0)+\frac{(x-x_0)}{(x_1-x_0)}f(x_1)\right]{\rm{d}}x\\&+\frac{1}{2}\int_{x_0}^{x_1} f^{\prime\prime}(\xi(x))(x-x_0)(x-x_1){\rm{d}}x\end{align*}
+$$
+
+由积分中值定理，误差项可以化为
+$$
+\begin{align*}\int_{x_0}^{x_1} f^{\prime\prime}(\xi(x))(x-x_0)(x-x_1){\rm{d}}x&=f^{\prime\prime}(\xi)\int_{x_0}^{x_1}(x-x_0)(x-x_1){\rm{d}}x\\&=f^{\prime\prime}(\xi)\left[\frac{x^3}{3}-\frac{(x_0+x_1)x^2}{2}+x_0x_1x\right]_{x_0}^{x_1}\\&=-\frac{h^3}{6}f^{\prime\prime}(\xi),\quad \xi \in (x_0,x_1)\end{align*}
+$$
+
+因此
+$$
+\begin{align*}\int_a^b f(x){\rm{d}}x&=\int_{x_0}^{x_1}\left[\frac{(x-x_1)}{(x_0-x_1)}f(x_0)+\frac{(x-x_0)}{(x_1-x_0)}f(x_1)\right]{\rm{d}}x-\frac{h^3}{12}f^{\prime\prime}(\xi)\\&=\left[\frac{(x-x_1)^2}{2(x_0-x_1)}f(x_0)+\frac{(x-x_0)^2}{2(x_1-x_0)}f(x_1)\right]_{x_0}^{x_1}-\frac{h^3}{12}f^{\prime\prime}(\xi)\\&=\frac{x_1-x_0}{2}[f(x_0)+f(x_1)]-\frac{h^3}{12}f^{\prime\prime}(\xi)\\&=\frac{h}{2}[f(x_0)+f(x_1)]-\frac{h^3}{12}f^{\prime\prime}(\xi)\quad(h=b-a=x_1-x_0)\end{align*}
+$$
+
+::: callout-note
+**积分中值定理**
+
+假设 $f\in C[a,b]$，$g$ 在 $[a,b]$ 上的黎曼积分存在，并且 $g$ 在$[a,b]$ 上不变号，则存在 $c\in (a,b)$，使得 $$\int_a^b f(x)g(x)\,{\rm{d}} x=f(c)\int_a^b g(x)\,{\rm{d}} x$$
+:::
