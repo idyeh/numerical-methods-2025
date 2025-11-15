@@ -1,0 +1,2295 @@
+---
+title: "常微分方程数值解"
+---
+
+# 引言
+
+## 什么是常微分方程?
+
+**常微分方程**（Ordinary Differential Equation，ODE）是描述未知函数及其导数之间关系的方程。它是数学建模中最重要的工具之一，可以描述自然界和工程中的动态变化过程。
+
+一个 **n 阶常微分方程**的一般形式为：
+$$
+F(t, y, y', y'', \ldots, y^{(n)}) = 0
+$$
+
+其中 $y = y(t)$ 是关于自变量 $t$ 的未知函数。最常见的是**一阶常微分方程**：
+$$
+y'(t) = f(t, y(t))
+$$
+
+## ODE 的起源与历史
+
+微分方程的历史可以追溯到 17 世纪：
+
+- **牛顿(Newton, 1687)**：在《自然哲学的数学原理》中用微分方程描述行星运动，建立了经典力学体系
+- **莱布尼茨(Leibniz, 1693)**：求解了第一个微分方程，研究了悬链线问题
+- **欧拉(Euler, 18世纪)**：发展了求解 ODE 的系统方法，提出了欧拉法
+- **龙格和库塔(Runge & Kutta, ~1900)**：发展了高精度的 Runge-Kutta 方法
+
+## ODE 在现代科学与工程中的应用
+
+常微分方程是描述**动态系统**（Dynamical Systems）的通用语言，在众多领域都有重要应用:
+
+### 物理学与工程
+- **经典力学**：牛顿第二定律 $F = ma$ 可以写成 $\ddot{x} = F(t,x,\dot{x})/m$
+- **电路分析**：RLC 电路的电流和电压由 ODE 描述
+- **控制系统**：飞行器姿态控制、自动驾驶的轨迹规划
+- **结构动力学**：建筑物的地震响应、桥梁的振动分析
+
+### 生物医学
+- **种群动力学**：Logistic 模型描述种群增长，即 $\frac{dy}{dt} = ry(1-y/K)$
+- **传染病传播**：SIR/SEIR 模型预测疫情发展趋势
+- **药物代谢**：药物在体内的吸收、分布、代谢、排泄（ADME）过程
+- **神经科学**：Hodgkin-Huxley 模型描述神经元的电活动
+
+### 化学与化工
+- **化学反应动力学**：反应物浓度随时间的变化
+- **反应器设计**：连续搅拌反应器（CSTR）的动态行为
+
+### 经济金融
+- **期权定价**：Black-Scholes 方程(虽然是偏微分方程，但可转化为 ODE)
+- **宏观经济模型**：Solow 增长模型、IS-LM 模型
+
+### 气候与环境
+- **气候模型**：地球能量平衡模型
+- **污染物扩散**：河流、大气中污染物浓度的时间演化
+
+## 为什么要数值法?
+
+尽管 ODE 理论非常完善，但绝大多数实际问题的 ODE **没有解析解**。例如：
+
+- **三体问题**无法用初等函数表示
+- 非线性 ODE 通常无法求解析解
+- 即使有解析解，也可能过于复杂而无法计算
+
+因此，**数值方法**成为求解 ODE 的主要工具。数值方法:
+
+- 将连续问题离散化为有限步的计算
+- 能够处理任意复杂的非线性系统
+- 可以在计算机上高效实现
+- 能够控制误差和稳定性
+
+## 本章学习路线图
+
+我们将按以下路径学习 ODE 数值解法:
+
+1. **数值微分**：学习如何用离散数据近似导数，理解误差来源
+2. **初值问题与显式方法**：从最简单的 Euler 法到高精度的 Runge-Kutta 方法
+3. **误差与稳定性分析**：理解数值解的可靠性,认识“刚性”问题
+4. **实战项目:参数反演**：从观测数据推断模型参数
+
+## 学习目标
+
+完成本章学习后，将能够:
+
+* 通过泰勒展开推导**数值微分**公式（前向/后向/中心差分）并分析误差阶；理解“微分放大噪声”的原因
+* 构建初值问题 $y'=f(t,y),\ y(t_0)=y_0$ 的**显式求解器**：Euler、RK2(中点/Heun)、RK4；识别**局部/全局误差**关系
+* 通过试验方程 $y'=\lambda y$ 理解**绝对稳定域**与“刚性（stiffness）”,判断显式方法何时不稳定
+* 在真实/合成数据上搭建**非线性最小二乘的参数反演**：以 Logistic 或 SIR 为例，定义损失函数、计算梯度（灵敏度方程）
+* （选学）用 JAX 实现可微 ODE 求解器：使用 `lax.scan` 写 RK4，用 `grad` 自动获取参数梯度
+
+# 一、数值微分
+
+## 为什么需要数值微分?
+
+在许多实际问题中需要从离散的数据点估计函数的导数:
+
+- **实验数据**：传感器采集的温度、压力等物理量随时间的变化
+- **图像处理**：检测图像的边缘（梯度）
+- **信号处理**：分析信号的变化率
+
+然而，导数本身是**极限**的概念:
+$$
+f'(x) = \lim_{h \to 0} \frac{f(x+h) - f(x)}{h}
+$$
+
+在数值计算中，$h$ 不能真正趋于零（会受到舍入误差影响），因此需要**有限差分近似**。
+
+## 泰勒展开
+
+设 $f(x)$ 在 $x$ 点附近足够光滑（具有足够多阶连续导数），则根据 **泰勒(Taylor)展开**:
+
+$$
+f(x+h) = f(x) + h f'(x) + \frac{h^2}{2!} f''(x) + \frac{h^3}{3!} f'''(x) + \cdots
+$$
+
+$$
+f(x-h) = f(x) - h f'(x) + \frac{h^2}{2!} f''(x) - \frac{h^3}{3!} f'''(x) + \cdots
+$$
+
+用 $O(h^p)$ 表示**截断误差**的阶：当 $h \to 0$ 时,误差以 $h^p$ 的速度趋于零。
+
+### 前向差分（Forward Difference）
+
+从泰勒展开式:
+$$
+f(x+h) = f(x) + h f'(x) + \frac{h^2}{2} f''(x) + O(h^3)
+$$
+
+移项得:
+$$
+h f'(x) = f(x+h) - f(x) - \frac{h^2}{2} f''(x) + O(h^3)
+$$
+
+两边除以 $h$:
+$$
+f'(x) = \frac{f(x+h) - f(x)}{h} - \frac{h}{2} f''(x) + O(h^2)
+$$
+
+因此**前向差分公式**为:
+$$
+\boxed{f'(x) \approx \frac{f(x+h) - f(x)}{h}}
+$$
+
+**截断误差**为 $O(h)$，称为**一阶精度**。主导误差项是 $-\displaystyle\frac{h}{2} f''(x)$。
+
+### 后向差分（Backward Difference）
+
+类似地，从 $f(x-h)$ 的泰勒展开:
+$$
+f(x-h) = f(x) - h f'(x) + \frac{h^2}{2} f''(x) + O(h^3)
+$$
+
+移项并除以 $h$:
+$$
+f'(x) = \frac{f(x) - f(x-h)}{h} + \frac{h}{2} f''(x) + O(h^2)
+$$
+
+**后向差分公式**：
+$$
+\boxed{f'(x) \approx \frac{f(x) - f(x-h)}{h}}
+$$
+
+截断误差同样为 $O(h)$。
+
+### 中心差分(Central Difference)
+
+这是最常用的二阶精度公式。将两个泰勒展开式相减:
+$$
+\begin{aligned}
+f(x+h) &= f(x) + h f'(x) + \frac{h^2}{2} f''(x) + \frac{h^3}{6} f'''(x) + O(h^4)\\
+f(x-h) &= f(x) - h f'(x) + \frac{h^2}{2} f''(x) - \frac{h^3}{6} f'''(x) + O(h^4)
+\end{aligned}
+$$
+
+两式相减：
+$$
+f(x+h) - f(x-h) = 2h f'(x) + \frac{2h^3}{6} f'''(x) + O(h^5)
+$$
+
+除以 $2h$：
+$$
+f'(x) = \frac{f(x+h) - f(x-h)}{2h} - \frac{h^2}{6} f'''(x) + O(h^4)
+$$
+
+**中心差分公式**:
+$$
+\boxed{f'(x) \approx \frac{f(x+h) - f(x-h)}{2h}}
+$$
+
+**截断误差**为 $O(h^2)$，精度比前向/后向差分高一阶。注意主导误差项中 $f''(x)$ 被消除了。
+
+## “微分放大噪声”现象
+
+数值微分存在一个根本性的矛盾：
+
+1. **截断误差**来自泰勒展开的截断，随 $h$ 减小而减小
+2. **舍入误差**来自浮点运算的精度限制，通过差商运算被放大，随 $h$ 减小而增大
+
+假设函数值有测量/舍入误差 $\epsilon$，则差商的误差为：
+$$
+\left| \frac{(f(x+h)+\epsilon_1) - (f(x)+\epsilon_2)}{h} - \frac{f(x+h)-f(x)}{h} \right| \approx \frac{2\epsilon}{h}
+$$
+
+总误差 $\approx Ch + \displaystyle\frac{D\epsilon}{h}$，对 $h$ 求导并令其为零（回顾上一章求极值的方法）可得最优步长:
+$$
+h_{\text{opt}} \sim \sqrt{\epsilon}
+$$
+
+对于双精度浮点数($\epsilon \sim 10^{-16}$)，最优步长约为 $10^{-8}$。
+
+在实际应用中，为了减轻“微分放大噪声”问题，常采用以下方法:
+
+- **Savitzky-Golay 滤波器**：用多项式拟合局部数据，然后对多项式求导
+- **正则化方法**：将求导问题转化为优化问题，加入光滑性约束
+- **小波分析**：在不同尺度上分析信号的变化
+
+## 数值验证
+
+我们通过实验验证前向差分和中心差分的理论收敛阶。
+
+```{python}
+import numpy as np
+import matplotlib.pyplot as plt
+
+# 设置中文字体
+plt.rcParams["font.sans-serif"] = ["PingFang SC", "Arial Unicode MS", "SimHei"]
+plt.rcParams["axes.unicode_minus"] = False
+
+# 定义测试函数及其精确导数
+def f(x):
+    """测试函数: sin(x)"""
+    return np.sin(x)
+
+def df_exact(x):
+    """精确导数: cos(x)"""
+    return np.cos(x)
+
+# 测试点
+x0 = 1.0
+df_true = df_exact(x0)
+
+# 生成一系列步长 h (从大到小)
+hs = 2.0 ** (-np.arange(1, 11))  # [0.5, 0.25, 0.125, ..., 0.001953125]
+
+# 计算各步长下的误差
+err_forward = []
+err_central = []
+
+for h in hs:
+    # 前向差分
+    df_forward = (f(x0 + h) - f(x0)) / h
+    err_forward.append(abs(df_forward - df_true))
+    
+    # 中心差分
+    df_central = (f(x0 + h) - f(x0 - h)) / (2 * h)
+    err_central.append(abs(df_central - df_true))
+
+# 绘制误差-步长图 (对数坐标)
+plt.figure(figsize=(6, 4))
+plt.loglog(hs, err_forward, "-o", label=r"前向差分 $O(h)$", markersize=5)
+plt.loglog(hs, err_central, "-s", label=r"中心差分 $O(h^2)$", markersize=5)
+
+# 添加理论斜率参考线
+plt.loglog(hs, hs, "k--", lw=1, alpha=0.5, label=r"参考: $h$")
+plt.loglog(hs, hs**2, "k-.", lw=1, alpha=0.5, label=r"参考: $h^2$")
+
+plt.gca().invert_xaxis()  # 反转x轴,使步长从大到小
+plt.grid(True, which="both", alpha=0.3)
+plt.legend()
+plt.xlabel("步长 $h$")
+plt.ylabel("绝对误差")
+plt.title("数值微分误差阶验证: $f(x) = \\sin(x)$ 在 $x=1$")
+plt.tight_layout()
+plt.show()
+
+# 打印部分结果
+print("\n步长 h\t\t前向差分误差\t中心差分误差")
+print("-" * 50)
+for i in [0, 3, 6, 9]:
+    print(f"{hs[i]:.6f}\t{err_forward[i]:.2e}\t{err_central[i]:.2e}")
+```
+
+**观察与分析**:
+
+- 在对数坐标下，误差曲线的斜率等于收敛阶
+- 前向差分的误差曲线斜率约为 1，验证了 $O(h)$
+- 中心差分的误差曲线斜率约为 2，验证了 $O(h^2)$
+- 当 $h$ 很小时($h < 10^{-8}$)，舍入误差开始主导，误差不再减小甚至增大
+
+
+# 二、初值问题与基本显式方法
+
+## 初值问题的数学描述
+
+**初值问题**（Initial Value Problem，IVP）的标准形式如下：
+$$
+\boxed{
+\begin{cases}
+y'(t) = f(t, y(t)), & t \in [t_0, T] \\
+y(t_0) = y_0
+\end{cases}
+}
+$$
+
+其中:
+
+- $t$ 是**自变量**，通常表示时间
+- $y(t)$ 是**未知函数**，可以是标量或向量
+- $f(t,y)$ 是**右端函数**，描述系统的动力学
+- $y_0$ 是**初始条件**
+- $[t_0, T]$ 是**求解区间**
+
+### 例子
+
+1. **自由落体**: $\ddot{x} = -g$ 可以改写为
+   $$
+   \begin{cases}
+   v' = -g \\
+   x' = v
+   \end{cases}
+   $$
+   其初始条件为 $x(0) = h_0, v(0) = 0$
+
+2. **RC 电路充电**: $\displaystyle\frac{dV}{dt} = \frac{V_s - V}{RC}$，初始条件 $V(0) = 0$
+
+3. **Logistic 增长**: $\displaystyle\frac{dy}{dt} = ry(1-y/K)$，初始条件 $y(0) = y_0$
+
+## 离散化
+
+由于计算机只能处理有限步的计算，我们需要将连续的 ODE 问题**离散化**（discretization）:
+
+**时间网格**
+
+将求解区间 $[t_0, T]$ 划分为 $N$ 个子区间：
+$$
+t_0 < t_1 < t_2 < \cdots < t_N = T
+$$
+
+最简单的是**均匀网格** $t_{n+1} = t_n + h$，其中 $h = \displaystyle\frac{T - t_0}{N}$ 称为**步长**。
+
+**数值解**
+
+用 $y_n$ 表示在 $t_n$ 时刻对 $y(t_n)$ 的**近似值**:
+$$
+y_n \approx y(t_n), \quad n = 0, 1, 2, \ldots, N
+$$
+
+初始条件可以直接给出：$y_0 = y(t_0)$。
+
+**递推格式**
+
+数值方法的核心是设计一个**递推公式**，从 $y_n$ 计算其下一步的值，即 $y_{n+1}$:
+$$
+y_{n+1} = y_n + h \cdot \Phi(t_n, y_n, h; f)
+$$
+
+其中 $\Phi$ 称为**增量函数**，不同的方法对应了不同的 $\Phi$。
+
+## 误差分析：局部与全局
+
+假设在 $t_n$ 时刻，数值解**完全精确**，即 $y_n = y(t_n)$。那么，单步之后产生的误差称为**局部截断误差**（Local Truncation Error，LTE）：
+$$
+\text{LTE}_n = y(t_{n+1}) - y_{n+1}
+$$
+
+如果 $\text{LTE}_n = O(h^{p+1})$，则称该方法具有 **$p$ 阶精度**。
+
+::: {.callout-note}
+#### 为什么是 $p+1$ 而不是 $p$?
+因为我们通常考虑**单步误差**相对于步长 $h$ 的阶数。对于从 $t_n$ 到 $t_{n+1} = t_n + h$ 的单步，$h$ 本身就是“尺子”，所以误差按 $h^{p+1}$ 衰减，意味着该方法是 $p$ 阶的。
+:::
+
+在实际计算中，每一步都会累积误差。**全局误差**（Global Error，GTE）是指在 $t = T$ 处，数值解与精确解的差：
+$$
+\text{GTE} = y(T) - y_N
+$$
+
+**重要定理**：如果单步方法的局部截断误差为 $O(h^{p+1})$。在满足一定条件下(Lipschitz 连续性等)，全局误差为 $O(h^p)$。
+
+直观理解:
+
+- 总共有 $N = \displaystyle\frac{T-t_0}{h}$ 步
+- 每步的局部误差 $\sim h^{p+1}$
+- 累积后: $N \times h^{p+1} = \displaystyle\frac{T-t_0}{h} \times h^{p+1} = (T-t_0) h^p$
+
+## Euler 方法：最简单的数值格式
+
+回顾导数的定义：
+$$
+y'(t_n) = \lim_{h \to 0} \frac{y(t_n + h) - y(t_n)}{h}
+$$
+
+在数值方法中，我们用差商代替导数，以有限的 $h$ 近似得到：
+$$
+y'(t_n) \approx \frac{y(t_{n+1}) - y(t_n)}{h}
+$$
+
+结合 ODE，$y'(t_n) = f(t_n, y(t_n))$：
+$$
+\frac{y(t_{n+1}) - y(t_n)}{h} \approx f(t_n, y(t_n))
+$$
+
+移项得到 **Euler 方法**（也称**显式 Euler 法**或**前向 Euler 法**）：
+$$
+\boxed{y_{n+1} = y_n + h \cdot f(t_n, y_n)}
+$$
+
+**几何解释**
+
+Euler 方法沿着 $(t_n, y_n)$ 点的**切线方向**前进一步。切线斜率为 $f(t_n, y_n)$。
+
+**误差分析**
+
+对精确解 $y(t)$ 在 $t_n$ 处做泰勒展开：
+$$
+y(t_{n+1}) = y(t_n) + h y'(t_n) + \frac{h^2}{2} y''(t_n) + O(h^3)
+$$
+
+而 Euler 方法给出：
+$$
+y_{n+1} = y_n + h f(t_n, y_n)
+$$
+
+假设 $y_n = y(t_n)$（局部误差分析的假设），则：
+$$
+\text{LTE}_n = y(t_{n+1}) - y_{n+1} = \frac{h^2}{2} y''(t_n) + O(h^3) = O(h^2)
+$$
+
+因此 Euler 方法是 **1 阶方法**（局部误差 $O(h^2)$，全局误差 $O(h)$）。
+
+### 代码实现
+
+```{python}
+import numpy as np
+
+def euler(f, t0, y0, h, n):
+    """
+    Euler 方法求解 ODE: y' = f(t, y)
+    
+    参数:
+        f: 函数, f(t, y) 返回 dy/dt
+        t0: 初始时间
+        y0: 初始值 (可以是标量或数组)
+        h: 步长
+        n: 步数
+        
+    返回:
+        ts: 时间节点数组, 长度 n+1
+        ys: 数值解数组, 形状 (n+1, ...)
+    """
+    # 初始化数组
+    ts = np.empty(n + 1)
+    ys = np.empty((n + 1,) + np.shape(y0))
+    
+    ts[0] = t0
+    ys[0] = np.array(y0, dtype=float)
+    
+    # 逐步递推
+    for k in range(n):
+        ys[k+1] = ys[k] + h * f(ts[k], ys[k])
+        ts[k+1] = ts[k] + h
+    
+    return ts, ys
+
+# 测试: 求解 y' = -2y, y(0) = 1
+# 精确解: y(t) = exp(-2t)
+def test_euler():
+    f = lambda t, y: -2 * y
+    y_exact = lambda t: np.exp(-2 * t)
+    
+    t0, y0 = 0.0, 1.0
+    T = 2.0
+    h = 0.1
+    n = int((T - t0) / h)
+    
+    ts, ys = euler(f, t0, y0, h, n)
+    
+    print("Euler 方法测试:")
+    print(f"{'t':>6s} {'y_数值':>12s} {'y_精确':>12s} {'误差':>12s}")
+    print("-" * 48)
+    for i in [0, 5, 10, 15, 20]:
+        y_true = y_exact(ts[i])
+        error = abs(ys[i] - y_true)
+        print(f"{ts[i]:6.2f} {ys[i]:12.6f} {y_true:12.6f} {error:12.2e}")
+
+test_euler()
+```
+
+## Runge-Kutta 方法
+
+Euler 方法只使用了起点 $(t_n, y_n)$ 的信息，精度较低。**Runge-Kutta（RK）方法**通过在单步内**多次计算右端函数** $f$ 获得更高精度。
+
+### 二阶 Runge-Kutta 方法（RK2）
+
+RK2 有多种变体，这里介绍两种常见形式。
+
+#### 中点法（Midpoint Method）
+
+**思想**:不使用起点的斜率，而是使用**中点**的斜率来更新。
+
+**公式**:
+$$
+\boxed{
+\begin{aligned}
+k_1 &= f(t_n, y_n) \\
+k_2 &= f\left(t_n + \frac{h}{2}, y_n + \frac{h}{2} k_1\right) \\
+y_{n+1} &= y_n + h \cdot k_2
+\end{aligned}
+}
+$$
+
+**推导思路**:
+
+1. 先用 Euler 法走半步，到达中点：$y_{n+1/2} = y_n + \frac{h}{2} k_1$
+2. 在中点计算斜率：$k_2 = f(t_n + h/2, y_{n+1/2})$
+3. 用中点的斜率更新整步：$y_{n+1} = y_n + h k_2$
+
+通过泰勒展开可以证明，这个方法的局部截断误差为 $O(h^3)$，是 **2 阶方法**。
+
+#### Heun 方法
+
+又叫**改进 Euler 法**或**梯形预测-校正法**
+
+**思想**:先用 Euler 法预测终点值，然后取起点和终点斜率的平均值。
+
+**公式**:
+$$
+\boxed{
+\begin{aligned}
+k_1 &= f(t_n, y_n) \\
+k_2 &= f(t_n + h, y_n + h k_1) \\
+y_{n+1} &= y_n + \frac{h}{2}(k_1 + k_2)
+\end{aligned}
+}
+$$
+
+这相当于**梯形法则**的显式版本。
+
+::: callout-note
+请回顾数值积分一章的梯形法则。
+:::
+
+### 四阶 Runge-Kutta 方法（RK4）
+
+**经典 RK4** 是最常用的高精度显式方法，在精度和计算量之间取得了很好的平衡。
+
+**公式**:
+$$
+\boxed{
+\begin{aligned}
+k_1 &= f(t_n, y_n) \\
+k_2 &= f\left(t_n + \frac{h}{2}, y_n + \frac{h}{2} k_1\right) \\
+k_3 &= f\left(t_n + \frac{h}{2}, y_n + \frac{h}{2} k_2\right) \\
+k_4 &= f(t_n + h, y_n + h k_3) \\
+y_{n+1} &= y_n + \frac{h}{6}(k_1 + 2k_2 + 2k_3 + k_4)
+\end{aligned}
+}
+$$
+
+**理解**:
+
+- $k_1$: 起点的斜率
+- $k_2$: 用 $k_1$ 到达中点后的斜率
+- $k_3$: 用 $k_2$ 到达中点后的斜率（第二次估计）
+- $k_4$: 用 $k_3$ 到达终点后的斜率
+
+最终的更新是这四个斜率的**加权平均**，权重比 $\frac{1}{6}:  \frac{2}{6} : \frac{2}{6} : \frac{1}{6}$，更强调中点的信息。
+
+**精度**: RK4 的局部截断误差为 $O(h^5)$，因此是 **4 阶方法**。这意味着步长减半，全局误差减少约 16 倍。
+
+### Butcher 表记法
+
+**Butcher 表**（Butcher tableau）是 Runge-Kutta 方法的紧凑表示方式。
+
+一般的 $s$ 级 RK 方法可以写成:
+$$
+\begin{aligned}
+k_i &= f\left(t_n + c_i h, y_n + h \sum_{j=1}^{s} a_{ij} k_j\right), \quad i = 1, \ldots, s \\
+y_{n+1} &= y_n + h \sum_{i=1}^{s} b_i k_i
+\end{aligned}
+$$
+
+Butcher 表:
+$$
+\begin{array}{c|c}
+\mathbf{c} & A \\
+\hline
+& \mathbf{b}^T
+\end{array}
+\quad \Rightarrow \quad
+\begin{array}{c|cccc}
+c_1 & a_{11} & a_{12} & \cdots & a_{1s} \\
+c_2 & a_{21} & a_{22} & \cdots & a_{2s} \\
+\vdots & \vdots & \vdots & \ddots & \vdots \\
+c_s & a_{s1} & a_{s2} & \cdots & a_{ss} \\
+\hline
+& b_1 & b_2 & \cdots & b_s
+\end{array}
+$$
+
+**显式方法**的特点：$a_{ij} = 0$ 当 $j \geq i$ (矩阵 $A$ 是严格下三角)。
+
+**RK2 中点法**
+$$
+\begin{array}{c|cc}
+0 & 0 & 0 \\
+\frac{1}{2} & \frac{1}{2} & 0 \\
+\hline
+& 0 & 1
+\end{array}
+$$
+
+**RK2 Heun 法**
+$$
+\begin{array}{c|cc}
+0 & 0 & 0 \\
+1 & 1 & 0 \\
+\hline
+& \frac{1}{2} & \frac{1}{2}
+\end{array}
+$$
+
+**RK4 经典方法**
+$$
+\begin{array}{c|cccc}
+0 & 0 & 0 & 0 & 0 \\
+\frac{1}{2} & \frac{1}{2} & 0 & 0 & 0 \\
+\frac{1}{2} & 0 & \frac{1}{2} & 0 & 0 \\
+1 & 0 & 0 & 1 & 0 \\
+\hline
+& \frac{1}{6} & \frac{1}{3} & \frac{1}{3} & \frac{1}{6}
+\end{array}
+$$
+
+## 代码实现与模块化设计
+
+下面给出完整的、可复用的代码模板：
+
+```{python}
+import numpy as np
+
+def euler(f, t0, y0, h, n):
+    """
+    Euler 方法求解 ODE
+    
+    参数:
+        f: 右端函数 f(t, y)
+        t0: 初始时间
+        y0: 初始值
+        h: 步长
+        n: 步数
+        
+    返回:
+        ts: 时间数组, 长度 n+1
+        ys: 解数组, 形状 (n+1, ...)
+    """
+    ts = np.empty(n + 1)
+    ys = np.empty((n + 1,) + np.shape(y0))
+    ts[0] = t0
+    ys[0] = np.array(y0, dtype=float)
+    
+    for k in range(n):
+        ys[k+1] = ys[k] + h * f(ts[k], ys[k])
+        ts[k+1] = ts[k] + h
+    
+    return ts, ys
+
+
+def rk2_midpoint(f, t0, y0, h, n):
+    """
+    RK2 中点法求解 ODE
+    """
+    ts = np.empty(n + 1)
+    ys = np.empty((n + 1,) + np.shape(y0))
+    ts[0] = t0
+    ys[0] = np.array(y0, dtype=float)
+    
+    for k in range(n):
+        t, y = ts[k], ys[k]
+        k1 = f(t, y)
+        k2 = f(t + h/2, y + (h/2) * k1)
+        ys[k+1] = y + h * k2
+        ts[k+1] = t + h
+    
+    return ts, ys
+
+
+def rk2_heun(f, t0, y0, h, n):
+    """
+    RK2 Heun 方法求解 ODE
+    """
+    ts = np.empty(n + 1)
+    ys = np.empty((n + 1,) + np.shape(y0))
+    ts[0] = t0
+    ys[0] = np.array(y0, dtype=float)
+    
+    for k in range(n):
+        t, y = ts[k], ys[k]
+        k1 = f(t, y)
+        k2 = f(t + h, y + h * k1)
+        ys[k+1] = y + (h/2) * (k1 + k2)
+        ts[k+1] = t + h
+    
+    return ts, ys
+
+
+def rk4(f, t0, y0, h, n):
+    """
+    经典 RK4 方法求解 ODE
+    
+    参数:
+        f: 右端函数 f(t, y)
+        t0: 初始时间
+        y0: 初始值
+        h: 步长
+        n: 步数
+        
+    返回:
+        ts: 时间数组
+        ys: 解数组
+    """
+    ts = np.empty(n + 1)
+    ys = np.empty((n + 1,) + np.shape(y0))
+    ts[0] = t0
+    ys[0] = np.array(y0, dtype=float)
+    
+    for k in range(n):
+        t, y = ts[k], ys[k]
+        
+        # 计算四个斜率
+        k1 = f(t, y)
+        k2 = f(t + h/2, y + (h/2) * k1)
+        k3 = f(t + h/2, y + (h/2) * k2)
+        k4 = f(t + h, y + h * k3)
+        
+        # 加权平均更新
+        ys[k+1] = y + (h/6) * (k1 + 2*k2 + 2*k3 + k4)
+        ts[k+1] = t + h
+    
+    return ts, ys
+
+
+# 测试代码
+if __name__ == "__main__":
+    # 测试问题: y' = -y, y(0) = 1
+    # 精确解: y(t) = exp(-t)
+    
+    def f(t, y):
+        return -y
+    
+    def y_exact(t):
+        return np.exp(-t)
+    
+    t0, y0 = 0.0, 1.0
+    T = 2.0
+    h = 0.1
+    n = int((T - t0) / h)
+    
+    # 分别用三种方法求解
+    ts_e, ys_e = euler(f, t0, y0, h, n)
+    ts_r2, ys_r2 = rk2_midpoint(f, t0, y0, h, n)
+    ts_r4, ys_r4 = rk4(f, t0, y0, h, n)
+    
+    # 计算误差
+    err_e = abs(ys_e[-1] - y_exact(ts_e[-1]))
+    err_r2 = abs(ys_r2[-1] - y_exact(ts_r2[-1]))
+    err_r4 = abs(ys_r4[-1] - y_exact(ts_r4[-1]))
+    
+    print(f"在 t={T} 处的全局误差:")
+    print(f"Euler:        {err_e:.2e}")
+    print(f"RK2 (中点):   {err_r2:.2e}")
+    print(f"RK4:          {err_r4:.2e}")
+```
+
+
+# 三、误差与稳定性分析
+
+## 全局误差的数值验证
+
+我们用一个简单的例子验证理论预测的收敛阶。
+
+**测试问题**:
+$$
+y'(t) = \cos(t), \quad y(0) = 0, \quad t \in [0, 2]
+$$
+
+**精确解**: 
+$$
+y(t) = \sin(t)
+$$
+
+```{python}
+import numpy as np
+import matplotlib.pyplot as plt
+
+# 设置中文字体
+plt.rcParams["font.sans-serif"] = ["PingFang SC", "Arial Unicode MS", "SimHei"]
+plt.rcParams["axes.unicode_minus"] = False
+
+
+def f(t, y):
+    """右端函数: y' = cos(t)"""
+    return np.cos(t)
+
+
+def y_true(t):
+    """精确解: y = sin(t)"""
+    return np.sin(t)
+
+
+def run_method(method, h):
+    """运行指定方法并返回结果"""
+    t0, T = 0.0, 2.0
+    y0 = 0.0
+    n = int((T - t0) / h)
+    ts, ys = method(f, t0, y0, h, n)
+    return ts, ys
+
+
+# 测试一系列步长
+hs = 2.0 ** (-np.arange(2, 10))  # [0.25, 0.125, ..., 0.001953125]
+err_euler = []
+err_rk2 = []
+err_rk4 = []
+
+for h in hs:
+    # Euler 方法
+    ts, ys = run_method(euler, h)
+    err_euler.append(abs(ys[-1] - y_true(ts[-1])))
+
+    # RK2 中点法
+    ts, ys = run_method(rk2_midpoint, h)
+    err_rk2.append(abs(ys[-1] - y_true(ts[-1])))
+
+    # RK4 方法
+    ts, ys = run_method(rk4, h)
+    err_rk4.append(abs(ys[-1] - y_true(ts[-1])))
+
+# 绘制全局误差图
+plt.figure(figsize=(6, 4))
+plt.loglog(hs, err_euler, "-o", label="Euler: $O(h)$", markersize=6)
+plt.loglog(hs, err_rk2, "-s", label="RK2: $O(h^2)$", markersize=6)
+plt.loglog(hs, err_rk4, "-^", label="RK4: $O(h^4)$", markersize=6)
+
+# 添加参考线
+plt.loglog(hs, hs, "k--", lw=1, alpha=0.4, label=r"$h$")
+plt.loglog(hs, hs**2, "k-.", lw=1, alpha=0.4, label=r"$h^2$")
+plt.loglog(hs, hs**4, "k:", lw=1, alpha=0.4, label=r"$h^4$")
+
+plt.gca().invert_xaxis()
+plt.grid(True, which="both", alpha=0.3)
+plt.legend(loc="best")
+plt.xlabel("步长 $h$")
+plt.ylabel("在 $t=T$ 处的全局误差")
+plt.title("ODE 数值方法的全局误差收敛阶验证")
+plt.tight_layout()
+plt.show()
+
+# 打印收敛阶
+print("\n收敛阶验证 (通过连续两次误差的比值):")
+print(f"{'方法':<10s} {'误差比值':<15s} {'理论阶数':<10s}")
+print("-" * 40)
+print(f"{'Euler':<10s} {err_euler[-2] / err_euler[-1]:15.2f} {2.0:10.1f}")
+print(f"{'RK2':<10s} {err_rk2[-2] / err_rk2[-1]:15.2f} {4.0:10.1f}")
+print(f"{'RK4':<10s} {err_rk4[-2] / err_rk4[-1]:15.2f} {16.0:10.1f}")
+```
+
+**观察**:
+
+- 步长减半时，Euler 的误差约减半($2^1 = 2$)
+- RK2 的误差约减少 4 倍($2^2 = 4$)
+- RK4 的误差约减少 16 倍($2^4 = 16$)
+
+从而验证了全局误差的收敛阶: Euler $O(h)$, RK2 $O(h^2)$, RK4 $O(h^4)$。
+
+## 稳定性分析：为什么数值解会“爆炸”?
+
+即使 ODE 的精确解是稳定的（如指数衰减），数值解也可能**发散**或**振荡**。这是由于数值方法本身的稳定性问题。
+
+### 试验方程
+
+为了分析稳定性,我们考虑最简单的线性**试验方程**（Test Equation）：
+$$
+y'(t) = \lambda y(t), \quad y(0) = y_0
+$$
+
+其中 $\lambda$ 是复常数。精确解为:
+$$
+y(t) = y_0 e^{\lambda t}
+$$
+
+**稳定性条件**：当 $\Re(\lambda) < 0$ 时，精确解指数衰减 $y(t) \to 0$ as $t \to \infty$。
+
+### 稳定函数
+
+将数值方法应用于试验方程 $y' = \lambda y$,得到递推关系：
+$$
+y_{n+1} = R(z) \cdot y_n
+$$
+
+其中 $z = \lambda h$，$R(z)$ 称为该方法的**稳定函数**（Stability Function）。
+
+经过 $n$ 步后:
+$$
+y_n = [R(z)]^n y_0
+$$
+
+**数值稳定性条件**：当 $n \to \infty$ 时，为使 $y_n \to 0$，必须 $|R(z)| < 1$。
+
+### 常见方法的稳定函数
+
+**Euler 方法**
+$$
+y_{n+1} = y_n + h \lambda y_n = (1 + \lambda h) y_n
+$$
+
+因此:
+$$
+R_{\text{Euler}}(z) = 1 + z
+$$
+
+**RK2 中点法**
+通过类似计算:
+$$
+R_{\text{RK2-mid}}(z) = 1 + z + \frac{z^2}{2}
+$$
+
+**RK4 方法**
+$$
+R_{\text{RK4}}(z) = 1 + z + \frac{z^2}{2} + \frac{z^3}{6} + \frac{z^4}{24}
+$$
+
+注意这是 $e^z$ 的 Taylor 展开的前 5 项!
+
+### 绝对稳定域
+
+**定义**：使得 $|R(z)| < 1$ 的复平面区域 $\mathcal{S}$ 称为该方法的**绝对稳定域**（Absolute Stability Region）：
+$$
+\mathcal{S} = \{z \in \mathbb{C} : |R(z)| < 1\}
+$$
+
+**实际意义**：为了数值稳定，需要 $z = \lambda h \in \mathcal{S}$。
+
+Euler 方法的稳定域
+$$
+|1 + z| < 1
+$$
+
+这是以 $(-1, 0)$ 为圆心、半径为 1 的圆盘：
+$$
+|z - (-1)| < 1
+$$
+
+对于实数 $\lambda < 0$，要求:
+$$
+-2 < \lambda h < 0 \quad \Rightarrow \quad h < \frac{2}{|\lambda|}
+$$
+
+
+RK4 的稳定域更大，近似覆盖:
+$$
+-3 < \Re(z) < 0
+$$
+
+沿虚轴延伸约 $\pm 3i$。
+
+```{python}
+import numpy as np
+import matplotlib.pyplot as plt
+
+# 设置中文字体
+plt.rcParams["font.sans-serif"] = ["PingFang SC", "Arial Unicode MS", "SimHei"]
+plt.rcParams["axes.unicode_minus"] = False
+
+# 创建复平面网格
+xr = np.linspace(-4, 2, 800)
+xi = np.linspace(-3, 3, 800)
+X, I = np.meshgrid(xr, xi)
+Z = X + 1j * I
+
+# 计算稳定函数的模
+R_euler = 1 + Z
+R_rk2 = 1 + Z + Z**2 / 2
+R_rk4 = 1 + Z + Z**2/2 + Z**3/6 + Z**4/24
+
+# 绘制稳定域
+fig, axes = plt.subplots(3, 1, figsize=(4, 15))
+
+methods = [
+    ("Euler", R_euler),
+    ("RK2 (中点)", R_rk2),
+    ("RK4", R_rk4)
+]
+
+for ax, (name, R) in zip(axes, methods):
+    # 填充稳定域
+    contourf = ax.contourf(xr, xi, np.abs(R), 
+                           levels=[0, 1, 10], 
+                           colors=['lightblue', 'white'],
+                           alpha=0.6)
+    
+    # 绘制边界 |R(z)| = 1
+    ax.contour(xr, xi, np.abs(R), levels=[1], 
+               colors='red', linewidths=2)
+    
+    # 添加坐标轴
+    ax.axhline(y=0, color='k', linewidth=0.5, alpha=0.3)
+    ax.axvline(x=0, color='k', linewidth=0.5, alpha=0.3)
+    
+    ax.set_xlabel("$\\mathrm{Re}(z)$", fontsize=11)
+    ax.set_ylabel("$\\mathrm{Im}(z)$", fontsize=11)
+    ax.set_title(f"{name} 方法的绝对稳定域", fontsize=12, pad=10)
+    ax.grid(True, alpha=0.2)
+    ax.set_aspect('equal')
+    
+    # 添加说明
+    ax.text(0.05, 0.95, "蓝色区域: $|R(z)| < 1$\n(稳定区域)",
+            transform=ax.transAxes,
+            verticalalignment='top',
+            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5),
+            fontsize=9)
+
+plt.tight_layout()
+plt.show()
+```
+
+**关键观察**:
+
+- 所有显式 RK 方法的稳定域都是**有界**的
+- 高阶方法（RK4）的稳定域比低阶方法（Euler）大，但仍然有限
+- 稳定域主要在左半平面($\Re(z) < 0$)
+
+## 刚性问题
+
+**刚性问题**是指包含**多个时间尺度**的 ODE，其中某些分量变化很快（对应大负特征值），而我们关心的是较慢的长期行为。
+
+例如，化学反应系统中，某些中间产物快速平衡，而总体反应进程缓慢。
+
+**数学特征**：对于线性系统 $\mathbf{y}' = A \mathbf{y}$，如果系数矩阵 $A$ 的特征值 $\lambda_i$ 满足：
+$$
+\max_i |\Re(\lambda_i)| \gg \min_i |\Re(\lambda_i)|
+$$
+
+则称该系统是**刚性的**。**刚性比**(stiffness ratio)定义为:
+$$
+S = \frac{\max_i |\Re(\lambda_i)|}{\min_i |\Re(\lambda_i)|}
+$$
+
+对于显式方法，稳定性要求:
+$$
+h < \frac{C}{|\lambda_{\max}|}
+$$
+
+其中 $C$ 是稳定域的尺度，如 Euler 方法要求 $C=2$。
+
+如果 $|\lambda_{\max}|$ 很大，步长必须非常小，即使精度要求并不高（由较慢模式决定）。这导致：
+
+- **计算量巨大**：需要大量的小步长
+- **效率低下**：用高频率捕捉低频信号，“大材小用”
+
+看一个“刚性失败”的例子。
+
+考虑
+$$
+y' = -50 y, \quad y(0) = 1
+$$
+
+精确解 $y(t) = e^{-50t}$，快速衰减。
+
+```{python}
+import numpy as np
+import matplotlib.pyplot as plt
+
+def test_stiff(lambda_val, y0=1.0, T=0.5):
+    """
+    测试刚性问题: y' = lambda * y
+    
+    参数:
+        lambda_val: 系数 λ (负数)
+        y0: 初始值
+        T: 求解到时间 T
+    """
+    f = lambda t, y: lambda_val * y
+    y_exact = lambda t: y0 * np.exp(lambda_val * t)
+    
+    print(f"\n测试刚性问题: y' = {lambda_val} y, y(0) = {y0}")
+    print(f"精确解在 t={T}: {y_exact(T):.6e}")
+    print(f"Euler 稳定性要求: h < {2/abs(lambda_val):.4f}")
+    print(f"RK4 稳定性要求: h < {3/abs(lambda_val):.4f}")
+    print("\n" + "="*70)
+    print(f"{'步长 h':>8s} {'Euler |y(T)|':>15s} {'RK4 |y(T)|':>15s} {'精确值':>15s}")
+    print("="*70)
+    
+    test_hs = [0.1, 0.05, 0.01]
+    results = []
+    
+    for h in test_hs:
+        n = int(T / h)
+        
+        # Euler 方法
+        try:
+            ts_e, ys_e = euler(f, 0.0, y0, h, n)
+            y_euler_final = abs(ys_e[-1])
+        except:
+            y_euler_final = np.inf
+        
+        # RK4 方法
+        try:
+            ts_r, ys_r = rk4(f, 0.0, y0, h, n)
+            y_rk4_final = abs(ys_r[-1])
+        except:
+            y_rk4_final = np.inf
+        
+        y_true_final = abs(y_exact(T))
+        
+        print(f"{h:8.2f} {y_euler_final:15.2e} {y_rk4_final:15.2e} {y_true_final:15.2e}")
+        results.append((h, y_euler_final, y_rk4_final, y_true_final))
+    
+    return results
+
+# 测试不同刚性程度
+print("\n" + "="*70)
+print(" 刚性问题示例: λ = -50")
+print("="*70)
+results = test_stiff(lambda_val=-50.0, T=0.5)
+```
+
+**现象分析**:
+
+- 当 $h = 0.1 > 2/50 = 0.04$ 时，Euler 方法**不稳定**，数值解发散
+- 即使 $h = 0.05 > 0.04$，Euler 仍可能不稳定（边界附近）
+- RK4 的稳定域更大，但 $h = 0.1 > 3/50 = 0.06$ 时也会不稳定
+- 只有 $h$ 足够小时,数值解才稳定
+
+解决方案需要依靠隐式方法。对于刚性问题，应使用 **A-稳定**(A-stable)的方法，其稳定域包含整个左半平面。
+
+常见的 A-稳定方法：
+- **后向 Euler**: $y_{n+1} = y_n + h f(t_{n+1}, y_{n+1})$
+- **梯形法**(Crank-Nicolson): $y_{n+1} = y_n + \frac{h}{2}[f(t_n, y_n) + f(t_{n+1}, y_{n+1})]$
+
+这些方法需要在每步求解**非线性方程**（通常用 Newton 法），计算量更大，但允许用大步长，总体效率更高。
+
+::: {.callout-important}
+#### 显式 vs 隐式方法的选择
+- **非刚性问题**用显式方法（如 RK4），简单高效
+- **刚性问题**用隐式方法（如后向 Euler），或专门的刚性求解器(如 `scipy.integrate.solve_ivp` 的 `'Radau'` 方法)
+:::
+
+
+# 四、项目实战：ODE 参数反演
+
+## 问题背景：从数据推断模型参数
+
+在许多实际应用中，我们知道系统遵循某个 ODE 模型，但**不知道模型参数**。例如：
+
+- **传染病学**: 已知 SIR 模型，但不知道传染率 $\beta$ 和康复率 $\gamma$
+- **生态学**: 已知 Logistic 模型，但不知道增长率 $r$ 和承载量 $K$
+- **化学**: 已知反应动力学方程，但不知道反应速率常数
+
+**参数反演**（Parameter Inversion）又叫参数识别（Parameter Identification）的目标，它：
+
+1. 给定观测数据 $\{(t_i, y_i^{\text{obs}})\}_{i=1}^m$；
+2. 找到最佳参数 $\theta^*$，使得模型预测与观测最接近。
+
+## 非线性最小二乘框架
+
+首先需要把问题形式化，考虑参数化的 ODE
+$$
+\begin{cases}
+y'(t) = f(t, y; \theta), & t \in [t_0, T] \\
+y(t_0) = y_0
+\end{cases}
+$$
+
+其中 $\theta \in \mathbb{R}^p$ 是未知参数向量。
+
+定义**残差**：
+$$
+r_i(\theta) = y(t_i; \theta) - y_i^{\text{obs}}, \quad i = 1, \ldots, m
+$$
+
+其中 $y(t_i; \theta)$ 是参数为 $\theta$ 时的数值解。
+
+**目标函数**是加权最小二乘：
+$$
+\boxed{F(\theta) = \frac{1}{2} \sum_{i=1}^m w_i |r_i(\theta)|^2 = \frac{1}{2} \|\mathbf{r}(\theta)\|_W^2}
+$$
+
+其中 $w_i > 0$ 是权重，通常取 $w_i = 1/\sigma_i^2$,$\sigma_i$ 是观测误差的标准差。
+
+最小化 $F(\theta)$ 的常用方法:
+
+- **梯度下降**（Gradient Descent，GD）
+- **Newton 法**
+- **Levenberg-Marquardt 算法**，专为非线性最小二乘设计
+
+关键是计算**梯度** $\nabla_\theta F(\theta)$。
+
+::: callout-note
+关于具体算法描述，请参考《优化基础》一章的相关内容。
+:::
+
+## 灵敏度方程：计算梯度的关键
+
+定义**灵敏度矩阵**：
+$$
+S(t) = \frac{\partial y}{\partial \theta}(t) \in \mathbb{R}^{n \times p}
+$$
+
+其中 $n$ 是状态维数，$p$ 是参数个数。
+
+$S_{ij}(t) = \frac{\partial y_i(t)}{\partial \theta_j}$ 表示第 $i$ 个状态分量对第 $j$ 个参数的敏感程度。
+
+### 灵敏度方程的推导
+
+对 ODE $y' = f(t, y; \theta)$ 两边关于 $\theta_j$ 求偏导:
+$$
+\frac{\partial}{\partial \theta_j} y'(t) = \frac{\partial}{\partial \theta_j} f(t, y(t); \theta)
+$$
+
+左边：
+$$
+\frac{\partial y'}{\partial \theta_j} = \frac{d}{dt}\left(\frac{\partial y}{\partial \theta_j}\right) = S_j'(t)
+$$
+
+其中 $S_j = \frac{\partial y}{\partial \theta_j}$ 是 $S$ 的第 $j$ 列。
+
+右边用链式法则：
+$$
+\frac{\partial f}{\partial \theta_j} = \frac{\partial f}{\partial y} \cdot \frac{\partial y}{\partial \theta_j} + \frac{\partial f}{\partial \theta_j} = f_y(t, y; \theta) \cdot S_j + f_{\theta_j}(t, y; \theta)
+$$
+
+因此:
+$$
+S_j'(t) = f_y(t, y; \theta) \cdot S_j(t) + f_{\theta_j}(t, y; \theta)
+$$
+
+写成矩阵形式，即：
+$$
+\boxed{S'(t) = f_y(t, y; \theta) \cdot S(t) + f_\theta(t, y; \theta)}
+$$
+
+其中:
+
+- $f_y = \displaystyle\frac{\partial f}{\partial y} \in \mathbb{R}^{n \times n}$ 是 Jacobi 矩阵
+- $f_\theta = \displaystyle\frac{\partial f}{\partial \theta} \in \mathbb{R}^{n \times p}$ 是参数 Jacobi 矩阵
+
+**初始条件**：
+$$
+S(t_0) = \frac{\partial y_0}{\partial \theta}
+$$
+
+如果初值不依赖于参数，则 $S(t_0) = 0$。
+
+有了灵敏度矩阵，可以计算目标函数的**梯度**：
+$$
+\frac{\partial F}{\partial \theta_j} = \sum_{i=1}^m w_i r_i(\theta) \cdot \frac{\partial y(t_i)}{\partial \theta_j} = \sum_{i=1}^m w_i r_i(\theta) \cdot S_{j}(t_i)
+$$
+
+其向量形式：
+$$
+\boxed{\nabla_\theta F = \sum_{i=1}^m w_i \cdot S(t_i)^T \cdot r_i(\theta)}
+$$
+
+或者对于向量观测:
+$$
+\nabla_\theta F = S^T W \mathbf{r}
+$$
+
+其中 $S$ 是所有时间点的灵敏度堆叠，$W$ 是权重矩阵，$\mathbf{r}$ 是残差向量。
+
+## 案例1：Logistic 增长模型
+
+### 模型介绍
+
+**Logistic 方程**描述资源有限条件下的种群增长：
+$$
+\frac{dy}{dt} = r y \left(1 - \frac{y}{K}\right)
+$$
+
+其中
+
+- $y(t)$：种群数量
+- $r$：内禀增长率(intrinsic growth rate)
+- $K$：环境承载量(carrying capacity)
+
+它的**解析解**是
+$$
+y(t) = \frac{K y_0 e^{rt}}{K + y_0 (e^{rt} - 1)}
+$$
+
+当 $t \to \infty$ 时，$y(t) \to K$。
+
+### 公式推导
+
+对于 Logistic 模型：
+$$
+f(t, y; \theta) = r y \left(1 - \frac{y}{K}\right), \quad \theta = (r, K)
+$$
+
+Jacobi 矩阵 $f_y$ 是：
+$$
+\frac{\partial f}{\partial y} = r \left(1 - \frac{2y}{K}\right)
+$$
+
+参数 Jacobi 矩阵 $f_\theta$ 是：
+$$
+\frac{\partial f}{\partial r} = y \left(1 - \frac{y}{K}\right)
+$$
+
+$$
+\frac{\partial f}{\partial K} = r y \cdot \frac{y}{K^2}
+$$
+
+因此：
+$$
+f_\theta = \begin{bmatrix} y(1 - y/K) & ry^2/K^2 \end{bmatrix}
+$$
+
+完整代码实现如下：
+
+```{python}
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.optimize import least_squares
+
+# 设置中文字体
+plt.rcParams["font.sans-serif"] = ["PingFang SC", "Arial Unicode MS", "SimHei"]
+plt.rcParams["axes.unicode_minus"] = False
+
+
+# ================ Logistic 模型定义 ================
+def f_logistic(t, y, theta):
+    """
+    Logistic 模型右端函数
+
+    参数:
+        t: 时间
+        y: 状态 (标量)
+        theta: 参数 [r, K]
+
+    返回:
+        dy/dt
+    """
+    y = np.asarray(y, float).reshape(-1)[0]  # 确保标量
+    r, K = theta
+    return r * y * (1 - y / K)
+
+
+def dfdy_logistic(t, y, theta):
+    """Logistic 模型的 Jacobi 矩阵 ∂f/∂y"""
+    y = np.asarray(y, float).reshape(-1)[0]
+    r, K = theta
+    return np.array([[r * (1 - 2 * y / K)]])
+
+
+def dfdtheta_logistic(t, y, theta):
+    """Logistic 模型的参数 Jacobi 矩阵 ∂f/∂θ"""
+    y = np.asarray(y, float).reshape(-1)[0]
+    r, K = theta
+    # ∂f/∂r = y(1 - y/K)
+    # ∂f/∂K = r*y^2/K^2
+    return np.array([[y * (1 - y / K), r * y**2 / K**2]])
+
+
+# ================ RK4 求解器(带灵敏度) ================
+def rk4_with_sensitivity(f, dfdy, dfdtheta, t0, y0, S0, h, n, theta):
+    """
+    RK4 方法求解 ODE 及灵敏度方程
+
+    参数:
+        f: 右端函数 f(t, y, theta)
+        dfdy: Jacobi 矩阵函数 ∂f/∂y
+        dfdtheta: 参数 Jacobi 矩阵函数 ∂f/∂θ
+        t0, y0: 初始条件
+        S0: 灵敏度初值 (n_state, n_param)
+        h, n: 步长和步数
+        theta: 参数向量
+
+    返回:
+        ts: 时间数组
+        ys: 状态数组
+        Ss: 灵敏度数组
+    """
+    y = np.asarray(y0, float).reshape(-1)
+    n_state = y.size
+    S = np.asarray(S0, float).reshape(n_state, -1)
+    n_param = S.shape[1]
+
+    ts = [t0]
+    ys = [y.copy()]
+    Ss = [S.copy()]
+
+    t = t0
+    for _ in range(n):
+        # 定义组合的右端函数
+        def F(tt, yy, SS):
+            yy = np.asarray(yy).reshape(n_state)
+            SS = np.asarray(SS).reshape(n_state, n_param)
+
+            fy = f(tt, yy, theta).reshape(n_state)
+            A = dfdy(tt, yy, theta).reshape(n_state, n_state)
+            B = dfdtheta(tt, yy, theta).reshape(n_state, n_param)
+
+            fS = A @ SS + B
+            return fy, fS
+
+        # RK4 步骤
+        fy1, fS1 = F(t, y, S)
+        fy2, fS2 = F(t + h / 2, y + h * fy1 / 2, S + h * fS1 / 2)
+        fy3, fS3 = F(t + h / 2, y + h * fy2 / 2, S + h * fS2 / 2)
+        fy4, fS4 = F(t + h, y + h * fy3, S + h * fS3)
+
+        y_new = y + (h / 6) * (fy1 + 2 * fy2 + 2 * fy3 + fy4)
+        S_new = S + (h / 6) * (fS1 + 2 * fS2 + 2 * fS3 + fS4)
+
+        t = t + h
+        y = y_new
+        S = S_new
+
+        ts.append(t)
+        ys.append(y.copy())
+        Ss.append(S.copy())
+
+    return np.array(ts), np.array(ys), np.array(Ss)
+
+
+# ================ 生成合成观测数据 ================
+np.random.seed(42)
+
+# 真实参数
+theta_true = np.array([1.0, 10.0])  # r=1.0, K=10.0
+r_true, K_true = theta_true
+
+# 时间范围
+t0, T = 0.0, 5.0
+n_steps = 500
+h = (T - t0) / n_steps
+
+# 初始条件
+y0 = np.array([0.5])
+S0 = np.zeros((1, 2))  # 初值不依赖参数
+
+# 求解精确轨迹
+ts_true, ys_true, _ = rk4_with_sensitivity(
+    f_logistic, dfdy_logistic, dfdtheta_logistic, t0, y0, S0, h, n_steps, theta_true
+)
+
+# 生成观测数据(添加噪声)
+n_obs = 20
+obs_indices = np.linspace(0, n_steps, n_obs, dtype=int)
+ts_obs = ts_true[obs_indices]
+ys_obs = ys_true[obs_indices, 0] + np.random.normal(0, 0.3, n_obs)
+
+
+# ================ 定义优化问题 ================
+def residual_and_jacobian(theta):
+    """
+    计算残差和 Jacobi 矩阵
+
+    参数:
+        theta: 参数 [r, K]
+
+    返回:
+        residuals: 残差向量 (n_obs,)
+        jacobian: Jacobi 矩阵 (n_obs, n_param)
+    """
+    # 求解 ODE 和灵敏度
+    ts, ys, Ss = rk4_with_sensitivity(
+        f_logistic, dfdy_logistic, dfdtheta_logistic, t0, y0, S0, h, n_steps, theta
+    )
+
+    # 提取观测时刻的值
+    y_pred = ys[obs_indices, 0]
+    S_obs = Ss[obs_indices, 0, :]  # (n_obs, n_param)
+
+    # 计算残差
+    residuals = y_pred - ys_obs
+
+    # Jacobi 矩阵
+    jacobian = S_obs
+
+    return residuals, jacobian
+
+
+# ================ 参数估计 ================
+# 初始猜测
+theta0 = np.array([0.5, 6.0])
+
+print("=" * 70)
+print(" Logistic 模型参数反演")
+print("=" * 70)
+print(f"真实参数: r={theta_true[0]:.3f}, K={theta_true[1]:.3f}")
+print(f"初始猜测: r={theta0[0]:.3f}, K={theta0[1]:.3f}")
+print("\n开始优化...")
+
+# 使用 scipy.optimize.least_squares
+result = least_squares(
+    fun=lambda theta: residual_and_jacobian(theta)[0],
+    jac=lambda theta: residual_and_jacobian(theta)[1],
+    x0=theta0,
+    method="lm",  # Levenberg-Marquardt
+    verbose=2,
+)
+
+theta_est = result.x
+print("\n" + "=" * 70)
+print(f"估计参数: r={theta_est[0]:.3f}, K={theta_est[1]:.3f}")
+print(
+    f"相对误差: r: {abs(theta_est[0] - theta_true[0]) / theta_true[0] * 100:.2f}%, "
+    f"K: {abs(theta_est[1] - theta_true[1]) / theta_true[1] * 100:.2f}%"
+)
+print("=" * 70)
+
+
+# ================ 可视化结果 ================
+# 用估计参数求解
+ts_est, ys_est, _ = rk4_with_sensitivity(
+    f_logistic, dfdy_logistic, dfdtheta_logistic, t0, y0, S0, h, n_steps, theta_est
+)
+
+fig, axes = plt.subplots(2, 1, figsize=(6, 8))
+
+# 拟合效果
+ax = axes[0]
+ax.plot(ts_true, ys_true[:, 0], "k-", linewidth=2, label="真实轨迹", alpha=0.7)
+ax.plot(ts_est, ys_est[:, 0], "r--", linewidth=2, label="拟合轨迹")
+ax.scatter(ts_obs, ys_obs, s=50, c="blue", marker="o", label="观测数据", zorder=5)
+ax.set_xlabel("时间 $t$", fontsize=12)
+ax.set_ylabel("种群数量 $y(t)$", fontsize=12)
+ax.set_title("Logistic 模型拟合结果", fontsize=14, fontweight="bold")
+ax.legend(fontsize=11)
+ax.grid(True, alpha=0.3)
+
+# 残差分布
+ax = axes[1]
+residuals_final = ys_est[obs_indices, 0] - ys_obs
+ax.scatter(ts_obs, residuals_final, s=50, c="red", marker="x")
+ax.axhline(y=0, color="k", linestyle="--", linewidth=1)
+ax.fill_between(ts_obs, -0.3, 0.3, alpha=0.2, color="gray", label="±0.3 (噪声水平)")
+ax.set_xlabel("时间 $t$", fontsize=12)
+ax.set_ylabel("残差 (预测 - 观测)", fontsize=12)
+ax.set_title("拟合残差分析", fontsize=14, fontweight="bold")
+ax.legend(fontsize=11)
+ax.grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.show()
+```
+
+### 识别性讨论
+
+**参数识别性**（Parameter Identifiability）是指从观测数据能否唯一确定参数的能力。
+
+对于 Logistic 模型：
+
+- **短时间观测**: 早期近似指数增长 $y \approx y_0 e^{rt}$，只能识别 $r$，不能识别 $K$
+- **长时间观测**: 包含饱和阶段，可以同时识别 $r$ 和 $K$
+- **参数相关性**: 如果观测窗口不够，$(r, K)$ 可能存在多组近似等价的解
+
+**改进策略**:
+
+- 延长观测时间，确保覆盖完整动力学过程
+- 增加观测频率和精度
+- 加入先验信息（贝叶斯方法）或正则化
+
+## 案例2：SIR 传染病模型
+
+### 模型介绍
+
+**SIR 模型**是流行病学中的经典模型，将人群分为三类:
+
+- $S(t)$: 易感者(Susceptible)
+- $I(t)$: 感染者(Infected)
+- $R(t)$: 康复者(Recovered)
+
+**方程组**：
+$$
+\begin{aligned}
+\frac{dS}{dt} &= -\frac{\beta}{N} S I \\
+\frac{dI}{dt} &= \frac{\beta}{N} S I - \gamma I \\
+\frac{dR}{dt} &= \gamma I
+\end{aligned}
+$$
+
+其中:
+
+- $N = S + I + R$ 是总人口（常数）
+- $\beta$: 传染率(contact rate)
+- $\gamma$: 康复率(recovery rate)
+- $R_0 = \beta/\gamma$: 基本再生数，即一个感染者在完全易感人群中能感染的平均人数
+
+### 公式推导
+
+状态向量 $\mathbf{y} = [S, I, R]^T$，参数向量 $\theta = [\beta, \gamma]^T$。
+
+右端函数：
+$$
+\mathbf{f}(\mathbf{y}; \theta) = \begin{bmatrix}
+-\beta SI/N \\
+\beta SI/N - \gamma I \\
+\gamma I
+\end{bmatrix}
+$$
+
+Jacobi 矩阵 $\mathbf{f}_{\mathbf{y}}$ 是：
+$$
+\mathbf{f}_{\mathbf{y}} = \frac{\partial \mathbf{f}}{\partial \mathbf{y}} = 
+\begin{bmatrix}
+-\beta I/N & -\beta S/N & 0 \\
+\beta I/N & \beta S/N - \gamma & 0 \\
+0 & \gamma & 0
+\end{bmatrix}
+$$
+
+参数 Jacobi 矩阵 $\mathbf{f}_\theta$ 是：
+$$
+\mathbf{f}_\theta = \frac{\partial \mathbf{f}}{\partial \theta} = 
+\begin{bmatrix}
+-SI/N & 0 \\
+SI/N & -I \\
+0 & I
+\end{bmatrix}
+$$
+
+完整代码实现如下：
+
+```{python}
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.optimize import least_squares
+
+# 设置中文字体
+plt.rcParams["font.sans-serif"] = ["PingFang SC", "Arial Unicode MS", "SimHei"]
+plt.rcParams["axes.unicode_minus"] = False
+
+
+# ================ SIR 模型定义 ================
+def f_sir(t, y, theta, N):
+    """
+    SIR 模型右端函数
+
+    参数:
+        t: 时间
+        y: 状态 [S, I, R]
+        theta: 参数 [beta, gamma]
+        N: 总人口
+
+    返回:
+        dy/dt
+    """
+    S, I, R = y
+    beta, gamma = theta
+    dS = -beta * S * I / N
+    dI = beta * S * I / N - gamma * I
+    dR = gamma * I
+    return np.array([dS, dI, dR])
+
+
+def dfdy_sir(t, y, theta, N):
+    """SIR 模型的 Jacobi 矩阵 ∂f/∂y"""
+    S, I, R = y
+    beta, gamma = theta
+    return np.array(
+        [
+            [-beta * I / N, -beta * S / N, 0],
+            [beta * I / N, beta * S / N - gamma, 0],
+            [0, gamma, 0],
+        ]
+    )
+
+
+def dfdtheta_sir(t, y, theta, N):
+    """SIR 模型的参数 Jacobi 矩阵 ∂f/∂θ"""
+    S, I, R = y
+    # 列: [∂f/∂β, ∂f/∂γ]
+    return np.array([[-S * I / N, 0], [S * I / N, -I], [0, I]])
+
+
+# ================ RK4 求解器(向量版) ================
+def rk4_sir_with_sens(f, dfdy, dfdtheta, t0, y0, S0, h, n, theta, N):
+    """
+    RK4 方法求解 SIR 模型及灵敏度方程(向量版本)
+
+    参数:
+        f, dfdy, dfdtheta: 模型函数
+        t0, y0: 初始条件
+        S0: 灵敏度初值 (n_state, n_param)
+        h, n: 步长和步数
+        theta: 参数向量
+        N: 总人口
+
+    返回:
+        ts, ys, Ss
+    """
+    y = np.asarray(y0, float).reshape(-1)
+    n_state = y.size
+    S = np.asarray(S0, float).reshape(n_state, -1)
+    n_param = S.shape[1]
+
+    ts = [t0]
+    ys = [y.copy()]
+    Ss = [S.copy()]
+
+    t = t0
+    for _ in range(n):
+        # 定义组合的右端函数
+        def F(tt, yy, SS):
+            yy = np.asarray(yy).reshape(n_state)
+            SS = np.asarray(SS).reshape(n_state, n_param)
+
+            fy = f(tt, yy, theta, N)
+            A = dfdy(tt, yy, theta, N)
+            B = dfdtheta(tt, yy, theta, N)
+
+            fS = A @ SS + B
+            return fy, fS
+
+        # RK4 步骤
+        fy1, fS1 = F(t, y, S)
+        fy2, fS2 = F(t + h / 2, y + h * fy1 / 2, S + h * fS1 / 2)
+        fy3, fS3 = F(t + h / 2, y + h * fy2 / 2, S + h * fS2 / 2)
+        fy4, fS4 = F(t + h, y + h * fy3, S + h * fS3)
+
+        y_new = y + (h / 6) * (fy1 + 2 * fy2 + 2 * fy3 + fy4)
+        S_new = S + (h / 6) * (fS1 + 2 * fS2 + 2 * fS3 + fS4)
+
+        t = t + h
+        y = y_new
+        S = S_new
+
+        ts.append(t)
+        ys.append(y.copy())
+        Ss.append(S.copy())
+
+    return np.array(ts), np.array(ys), np.array(Ss)
+
+
+# ================ 生成合成观测数据 ================
+np.random.seed(123)
+
+# 模型设置
+N = 1000.0
+theta_true = np.array([0.5, 0.1])  # beta=0.5, gamma=0.1
+beta_true, gamma_true = theta_true
+R0_true = beta_true / gamma_true
+print(f"SIR 模型真实参数: β={beta_true:.2f}, γ={gamma_true:.2f}, R₀={R0_true:.2f}")
+
+# 初始条件: 990 易感, 10 感染, 0 康复
+y0 = np.array([990.0, 10.0, 0.0])
+S0 = np.zeros((3, 2))  # 初值不依赖参数
+
+# 时间范围
+t0, T = 0.0, 80.0
+n_steps = 800
+h = (T - t0) / n_steps
+
+# 求解精确轨迹
+ts_true, ys_true, _ = rk4_sir_with_sens(
+    f_sir, dfdy_sir, dfdtheta_sir, t0, y0, S0, h, n_steps, theta_true, N
+)
+
+# 生成观测数据(只观测 I 分量,添加噪声)
+n_obs = 40
+obs_indices = np.linspace(0, n_steps, n_obs, dtype=int)
+ts_obs = ts_true[obs_indices]
+I_obs = ys_true[obs_indices, 1] + np.random.normal(0, 5.0, n_obs)
+
+
+# ================ 定义优化问题 ================
+def residual_and_jacobian_sir(theta):
+    """
+    计算残差和 Jacobi 矩阵(只对 I 分量)
+
+    参数:
+        theta: 参数 [beta, gamma]
+
+    返回:
+        residuals: 残差向量 (n_obs,)
+        jacobian: Jacobi 矩阵 (n_obs, n_param)
+    """
+    # 求解 ODE 和灵敏度
+    ts, ys, Ss = rk4_sir_with_sens(
+        f_sir, dfdy_sir, dfdtheta_sir, t0, y0, S0, h, n_steps, theta, N
+    )
+
+    # 只提取 I 分量
+    I_pred = ys[obs_indices, 1]
+    S_I = Ss[obs_indices, 1, :]  # I 对 θ 的灵敏度 (n_obs, n_param)
+
+    # 残差
+    residuals = I_pred - I_obs
+
+    # Jacobi 矩阵
+    jacobian = S_I
+
+    return residuals, jacobian
+
+
+# ================ 参数估计 ================
+# 初始猜测
+theta0 = np.array([0.3, 0.15])
+
+print("\n" + "=" * 70)
+print(" SIR 模型参数反演")
+print("=" * 70)
+print(f"真实参数: β={theta_true[0]:.3f}, γ={theta_true[1]:.3f}")
+print(f"初始猜测: β={theta0[0]:.3f}, γ={theta0[1]:.3f}")
+print("\n开始优化...")
+
+# 使用 scipy.optimize.least_squares
+result_sir = least_squares(
+    fun=lambda theta: residual_and_jacobian_sir(theta)[0],
+    jac=lambda theta: residual_and_jacobian_sir(theta)[1],
+    x0=theta0,
+    method="lm",
+    verbose=2,
+)
+
+theta_est_sir = result_sir.x
+R0_est = theta_est_sir[0] / theta_est_sir[1]
+
+print("\n" + "=" * 70)
+print(f"估计参数: β={theta_est_sir[0]:.3f}, γ={theta_est_sir[1]:.3f}, R₀={R0_est:.2f}")
+print(
+    f"相对误差: β: {abs(theta_est_sir[0] - theta_true[0]) / theta_true[0] * 100:.2f}%, "
+    f"γ: {abs(theta_est_sir[1] - theta_true[1]) / theta_true[1] * 100:.2f}%"
+)
+print("=" * 70)
+
+
+# ================ 可视化结果 ================
+# 用估计参数求解
+ts_est, ys_est, _ = rk4_sir_with_sens(
+    f_sir, dfdy_sir, dfdtheta_sir, t0, y0, S0, h, n_steps, theta_est_sir, N
+)
+
+fig, axes = plt.subplots(2, 2, figsize=(7, 5))
+
+# 左上: S-I-R 时间演化(真实)
+ax = axes[0, 0]
+ax.plot(ts_true, ys_true[:, 0], "b-", linewidth=2, label="S (易感者)")
+ax.plot(ts_true, ys_true[:, 1], "r-", linewidth=2, label="I (感染者)")
+ax.plot(ts_true, ys_true[:, 2], "g-", linewidth=2, label="R (康复者)")
+ax.set_xlabel("时间 (天)", fontsize=11)
+ax.set_ylabel("人数", fontsize=11)
+ax.set_title("SIR 模型: 真实动力学", fontsize=13, fontweight="bold")
+ax.legend(fontsize=10)
+ax.grid(True, alpha=0.3)
+
+# 右上: I 的拟合效果
+ax = axes[0, 1]
+ax.plot(ts_true, ys_true[:, 1], "k-", linewidth=2, label="真实 I(t)", alpha=0.7)
+ax.plot(ts_est, ys_est[:, 1], "r--", linewidth=2, label="拟合 I(t)")
+ax.scatter(
+    ts_obs, I_obs, s=30, c="blue", marker="o", label="观测数据", zorder=5, alpha=0.6
+)
+ax.set_xlabel("时间 (天)", fontsize=11)
+ax.set_ylabel("感染者人数 $I(t)$", fontsize=11)
+ax.set_title("感染者数量拟合", fontsize=13, fontweight="bold")
+ax.legend(fontsize=10)
+ax.grid(True, alpha=0.3)
+
+# 左下: S-I-R 比较(真实 vs 拟合)
+ax = axes[1, 0]
+for i, (name, color) in enumerate([("S", "blue"), ("I", "red"), ("R", "green")]):
+    ax.plot(
+        ts_true,
+        ys_true[:, i],
+        color=color,
+        linewidth=2,
+        linestyle="-",
+        label=f"{name} (真实)",
+        alpha=0.7,
+    )
+    ax.plot(
+        ts_est,
+        ys_est[:, i],
+        color=color,
+        linewidth=2,
+        linestyle="--",
+        label=f"{name} (拟合)",
+    )
+ax.set_xlabel("时间 (天)", fontsize=11)
+ax.set_ylabel("人数", fontsize=11)
+ax.set_title("真实 vs 拟合动力学对比", fontsize=13, fontweight="bold")
+ax.legend(fontsize=9, ncol=2)
+ax.grid(True, alpha=0.3)
+
+# 右下: 残差分布
+ax = axes[1, 1]
+residuals_sir = ys_est[obs_indices, 1] - I_obs
+ax.scatter(ts_obs, residuals_sir, s=50, c="red", marker="x")
+ax.axhline(y=0, color="k", linestyle="--", linewidth=1)
+ax.fill_between(ts_obs, -5, 5, alpha=0.2, color="gray", label="±5 (噪声水平)")
+ax.set_xlabel("时间 (天)", fontsize=11)
+ax.set_ylabel("残差 (预测 - 观测)", fontsize=11)
+ax.set_title("I(t) 拟合残差分析", fontsize=13, fontweight="bold")
+ax.legend(fontsize=10)
+ax.grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.show()
+```
+
+### 识别性分析
+
+**SIR 模型的参数识别性挑战**:
+
+1. **早期指数增长阶段**: 
+   - 当 $S \approx N$ 时，$dI/dt \approx (\beta - \gamma) I$
+   - 只能识别差值 $\beta - \gamma$，无法单独识别 $\beta$ 和 $\gamma$
+
+2. **观测单一变量**: 
+   - 只观测 $I(t)$ 时，存在参数相关性
+   - 不同的 $(\beta, \gamma)$ 组合可能产生相似的 $I(t)$ 曲线
+
+3. **改进策略**:
+   - **观测多个变量**: 同时观测 $S$、$I$、$R$ （或其中两个）
+   - **延长观测时间**: 覆盖疫情的完整周期，即上升-峰值-下降
+   - **重新参数化**: 用 $(R_0, \gamma)$ 代替 $(\beta, \gamma)$，其中 $R_0 = \beta/\gamma$
+   - **加入先验**: 基于过往流行病学知识，对参数范围施加约束
+
+## 小结
+
+* 数值微分来自泰勒展开：前/后向一阶、中央二阶；微分会放大噪声。
+* ODE 显式法：Euler（阶1）、RK2/4（高阶）；**局部 $p+1$ → 全局 $p$**。
+* 稳定性通过 $R(z)$ 与稳定域理解；刚性问题显式法易不稳，隐式法更合适。
+* 参数反演靠**最小二乘 + 灵敏度方程**（或自动微分）；注意**识别性**与观测可辨识条件。
+
+# 附录 A：隐式方法与刚性求解器
+
+## 后向 Euler 方法（Backward Euler）
+
+**公式**:
+$$
+y_{n+1} = y_n + h f(t_{n+1}, y_{n+1})
+$$
+
+这是一个**隐式方程**，需要求解非线性方程:
+$$
+F(y_{n+1}) = y_{n+1} - y_n - h f(t_{n+1}, y_{n+1}) = 0
+$$
+
+通常用 **Newton 迭代**求解:
+$$
+y_{n+1}^{(k+1)} = y_{n+1}^{(k)} - [I - h f_y(t_{n+1}, y_{n+1}^{(k)})]^{-1} F(y_{n+1}^{(k)})
+$$
+
+**稳定函数**:
+$$
+R_{\text{BE}}(z) = \frac{1}{1 - z}
+$$
+
+**稳定域**: $|1 - z| > 1$，即 $\Re(z) < 0$ 的整个左半平面。**A-稳定**。
+
+**精度**: 一阶方法，局部误差 $O(h^2)$，全局误差 $O(h)$。
+
+## 梯形方法（Trapezoidal Method / Crank-Nicolson）
+
+**公式**:
+$$
+y_{n+1} = y_n + \frac{h}{2} [f(t_n, y_n) + f(t_{n+1}, y_{n+1})]
+$$
+
+这是起点和终点斜率的平均，同样是隐式方法。
+
+**稳定函数**:
+$$
+R_{\text{Trap}}(z) = \frac{1 + z/2}{1 - z/2}
+$$
+
+**稳定域**: 左半平面 $\Re(z) < 0$。**A-稳定**。
+
+**精度**: 二阶方法，全局误差 $O(h^2)$。
+
+**缺点**: 对于刚性问题可能产生轻微振荡。
+
+## BDF 方法（Backward Differentiation Formulas）
+
+**思想**: 用多个历史点的线性组合近似当前点的导数。
+
+**BDF2**（二阶）:
+$$
+\frac{3y_{n+1} - 4y_n + y_{n-1}}{2h} = f(t_{n+1}, y_{n+1})
+$$
+
+**优点**: 对刚性问题非常有效，稳定域大。
+
+**缺点**: 需要多个起始值，实现较复杂。
+
+## 实际建议
+
+对于实际问题，推荐使用专业的 ODE 求解器。在 Python 数值计算中，可以用：
+
+```python
+from scipy.integrate import solve_ivp
+
+# 自动检测刚性,选择合适方法
+sol = solve_ivp(fun, t_span, y0, method='LSODA', rtol=1e-6, atol=1e-9)
+
+# 或显式指定方法
+# method='RK45': 显式 RK 方法(非刚性)
+# method='Radau': 隐式 Runge-Kutta 方法(刚性)
+# method='BDF': 后向差分公式(刚性)
+```
+
+# 附录 B：JAX 可微 ODE 求解
+
+## 动机
+
+在机器学习和科学计算中，经常需要对 ODE 求解器的输出关于参数求导：
+
+- **Neural ODEs**: 用 ODE 描述神经网络的连续动力学
+- **参数优化**: 用梯度下降优化 ODE 模型的参数
+- **不确定性量化**: 计算参数变化对预测的影响
+
+传统方法（如灵敏度方程）需要手工推导。**自动微分**（Automatic Differentiation）可以自动计算梯度。
+
+## JAX 实现可微 RK4
+
+```{python}
+try:
+    import jax
+    import jax.numpy as jnp
+    from jax import grad, jit, vmap
+
+    # 启用 64 位精度
+    jax.config.update("jax_enable_x64", True)
+
+    print("JAX 版本:", jax.__version__)
+    print("可用设备:", jax.devices())
+
+    # ================ RK4 求解器(JAX 版本) ================
+    def rk4_scan_jax(fun, t0, y0, h, steps, theta):
+        """
+        用 JAX 实现的 RK4 求解器,使用 lax.scan 进行循环
+
+        参数:
+            fun: 右端函数 fun(t, y, theta)
+            t0: 初始时间
+            y0: 初始值
+            h: 步长
+            steps: 步数
+            theta: 参数向量
+
+        返回:
+            tf: 最终时间
+            ys: 所有时刻的解(包括初值), 形状 (steps+1, ...)
+        """
+
+        def one_step(carry, _):
+            t, y = carry
+
+            # RK4 的四个斜率
+            k1 = fun(t, y, theta)
+            k2 = fun(t + h / 2, y + h * k1 / 2, theta)
+            k3 = fun(t + h / 2, y + h * k2 / 2, theta)
+            k4 = fun(t + h, y + h * k3, theta)
+
+            # 更新
+            y_new = y + (h / 6) * (k1 + 2 * k2 + 2 * k3 + k4)
+            t_new = t + h
+
+            return (t_new, y_new), y_new
+
+        # 使用 lax.scan 执行循环
+        (tf, yf), ys_scan = jax.lax.scan(one_step, (t0, y0), xs=None, length=steps)
+
+        # 合并初值
+        ys = jnp.vstack([y0.reshape(1, -1), ys_scan])
+
+        return tf, ys
+
+    # ================ Logistic 模型(JAX 版本) ================
+    def f_logistic_jax(t, y, theta):
+        """Logistic 模型: dy/dt = r*y*(1 - y/K)"""
+        r, K = theta
+        return r * y * (1 - y / K)
+
+    # ================ 定义损失函数 ================
+    def loss_logistic_jax(theta, ts_obs, y_obs, t0, y0, T, steps):
+        """
+        计算 Logistic 模型的损失函数
+
+        参数:
+            theta: 参数 [r, K]
+            ts_obs: 观测时间点
+            y_obs: 观测值
+            t0, y0: 初值
+            T: 终止时间
+            steps: 总步数
+
+        返回:
+            loss: 均方误差
+        """
+        h = (T - t0) / steps
+
+        # 求解 ODE
+        tf, ys = rk4_scan_jax(f_logistic_jax, t0, y0, h, steps, theta)
+
+        # 在观测时间点插值
+        # 简化: 假设观测点对应网格点
+        ts_grid = jnp.linspace(t0, T, steps + 1)
+        indices = jnp.searchsorted(ts_grid, ts_obs)
+        indices = jnp.clip(indices, 0, steps)
+
+        y_pred = ys[indices, 0]
+
+        # 均方误差
+        residuals = y_pred - y_obs
+        loss = 0.5 * jnp.mean(residuals**2)
+
+        return loss
+
+    # ================ 自动微分计算梯度 ================
+    # 使用 jax.grad 自动求梯度
+    grad_loss_jax = grad(loss_logistic_jax)
+
+    # 或者使用 jax.value_and_grad 同时获取值和梯度
+    value_and_grad_loss = jax.value_and_grad(loss_logistic_jax)
+
+    # ================ 测试 ================
+    print("\n" + "=" * 70)
+    print(" JAX 可微 ODE 示例")
+    print("=" * 70)
+
+    # 重新生成 Logistic 模型的观测数据(避免变量被覆盖)
+    # 真实参数
+    theta_true_logistic = np.array([1.0, 10.0])
+    t0_log, T_log = 0.0, 5.0
+    n_steps_log = 500
+    h_log = (T_log - t0_log) / n_steps_log
+    y0_log = np.array([0.5])
+    S0_log = np.zeros((1, 2))
+
+    # 求解精确轨迹
+    ts_true_log, ys_true_log, _ = rk4_with_sensitivity(
+        f_logistic,
+        dfdy_logistic,
+        dfdtheta_logistic,
+        t0_log,
+        y0_log,
+        S0_log,
+        h_log,
+        n_steps_log,
+        theta_true_logistic,
+    )
+
+    # 生成观测数据
+    n_obs_log = 20
+    obs_indices_log = np.linspace(0, n_steps_log, n_obs_log, dtype=int)
+    ts_obs_log = ts_true_log[obs_indices_log]
+    ys_obs_log = ys_true_log[obs_indices_log, 0] + np.random.normal(0, 0.3, n_obs_log)
+
+    # 测试参数
+    theta_test = jnp.array([0.6, 6.0])
+
+    # 准备 JAX 数组
+    ts_obs_jax = jnp.array(ts_obs_log)
+    ys_obs_jax = jnp.array(ys_obs_log)
+    y0_jax = jnp.array([0.5])
+
+    # 计算损失和梯度
+    loss_val, grad_val = value_and_grad_loss(
+        theta_test, ts_obs_jax, ys_obs_jax, t0_log, y0_jax, T_log, n_steps_log
+    )
+
+    print(f"\n测试参数: θ = {theta_test}")
+    print(f"损失值: {loss_val:.6f}")
+    print(f"梯度: ∇L = {grad_val}")
+
+    # ================ 用 JAX 优化 ================
+    print("\n使用 JAX 梯度下降优化...")
+
+    def gradient_descent_jax(loss_fn, theta0, args, lr=0.01, max_iter=100, tol=1e-6):
+        """简单的梯度下降"""
+        theta = theta0
+        history = []
+
+        grad_fn = grad(loss_fn)
+
+        for i in range(max_iter):
+            loss_val = loss_fn(theta, *args)
+            grad_val = grad_fn(theta, *args)
+
+            history.append(float(loss_val))
+
+            # 检查收敛
+            if jnp.linalg.norm(grad_val) < tol:
+                print(f"收敛于第 {i} 步")
+                break
+
+            # 梯度下降更新
+            theta = theta - lr * grad_val
+
+            if i % 20 == 0:
+                print(
+                    f"  迭代 {i:3d}: loss={loss_val:.6f}, ||grad||={jnp.linalg.norm(grad_val):.2e}"
+                )
+
+        return theta, history
+
+    # 优化参数
+    theta0_jax = jnp.array([0.5, 5.0])
+    args = (ts_obs_jax, ys_obs_jax, t0_log, y0_jax, T_log, n_steps_log)
+
+    theta_opt_jax, hist_jax = gradient_descent_jax(
+        loss_logistic_jax, theta0_jax, args, lr=0.1, max_iter=200
+    )
+
+    print(f"\n优化结果:")
+    print(f"  初始参数: {theta0_jax}")
+    print(f"  优化参数: {theta_opt_jax}")
+    print(f"  真实参数: {theta_true_logistic}")
+    print(f"  最终损失: {hist_jax[-1]:.6f}")
+
+    # ================ 可视化优化过程 ================
+    plt.figure(figsize=(6, 8))
+
+    plt.subplot(2, 1, 1)
+    plt.semilogy(hist_jax, "o-", markersize=3)
+    plt.xlabel("迭代次数")
+    plt.ylabel("损失值")
+    plt.title("JAX 梯度下降: 损失收敛")
+    plt.grid(True, alpha=0.3)
+
+    plt.subplot(2, 1, 2)
+    # 用优化参数求解并绘图
+    _, ys_opt_jax = rk4_scan_jax(
+        f_logistic_jax,
+        t0_log,
+        y0_jax,
+        (T_log - t0_log) / n_steps_log,
+        n_steps_log,
+        theta_opt_jax,
+    )
+    ts_plot_jax = jnp.linspace(t0_log, T_log, n_steps_log + 1)
+
+    plt.plot(ts_plot_jax, ys_opt_jax[:, 0], "r-", linewidth=2, label="JAX 优化结果")
+    plt.plot(
+        ts_true_log, ys_true_log[:, 0], "k--", linewidth=1, label="真实轨迹", alpha=0.5
+    )
+    plt.scatter(
+        ts_obs_log, ys_obs_log, s=30, c="blue", marker="o", label="观测数据", zorder=5
+    )
+    plt.xlabel("时间 $t$")
+    plt.ylabel("$y(t)$")
+    plt.title("JAX 优化拟合结果")
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.show()
+
+    print("\n" + "=" * 70)
+    print(" JAX 可微 ODE 演示完成!")
+    print("=" * 70)
+
+except ImportError as e:
+    print(f"JAX 未安装或导入失败: {e}")
+    print("可以通过以下命令安装 JAX:")
+    print("  pip install jax jaxlib")
+except Exception as e:
+    print(f"JAX 示例运行出错: {e}")
+```
+
+
+## 进阶学习
+
+### 理论方向
+- **自适应步长控制**: 根据误差估计自动调整步长(如 Runge-Kutta-Fehlberg 方法)
+- **辛积分器**(Symplectic Integrator): 保持 Hamiltonian 系统的几何结构
+- **指数积分器**(Exponential Integrator): 精确处理线性部分
+- **多步法**(Multistep Method): 如 Adams 方法, BDF 方法
+
+### 应用方向
+- **偏微分方程(PDE)**: 扩展到空间-时间耦合问题
+- **随机微分方程(SDE)**: 包含随机扰动的动力系统
+- **延迟微分方程(DDE)**: 考虑时间延迟效应
+- **微分代数方程(DAE)**: 微分方程与代数约束耦合
+
+### 计算工具
+- **专业求解器**: SUNDIALS、ODEPACK、Matlab ODE Suite
+- **机器学习集成**: Neural ODE、Physics-Informed Neural Network (PINN)
+- **高性能计算**: 并行 ODE 求解、GPU 加速
+
+### 实践建议
+
+1. **从简单到复杂**: 先在简单问题上验证代码，再处理实际问题
+2. **可视化**: 多画图，观察数值解的行为
+3. **误差检验**: 用解析解验证程序正确性
+4. **参数敏感性**: 分析参数变化对结果的影响
+5. **使用成熟库**: 实际项目中优先使用 `scipy.integrate.solve_ivp` 等专业工具
