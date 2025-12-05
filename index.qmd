@@ -15,7 +15,7 @@ title: "计算方法"
 |6| 线性方程组 I：LU 分解、主元选取、条件数与残差；数值稳定性 | [Lecture 6](./06_nla.html) |10/21|
 |7| 线性方程组 II：Jacobi/GS/CG；预条件直觉；批量右端并行 | [Lecture 6](./06_nla.html) |10/24|
 |8| 优化基础：梯度下降、牛顿/拟牛顿直觉，线搜索与停止准则；凸/非凸风险 | [Lecture 7](./07_optimization.html) |10/31,11/04 |
-|9| 常微分方程：Euler、RK2/RK4、局部/全局误差；稳定性与（非）刚性 | |10/21|
-|10| ODE 参数反演项目实战：以 Logistic/SIR 为例；定义损失、对参数求梯度、识别性问题 | |11/07|
-|11| 从 ODE 到 PDE：1D 热方程空间离散，显式格式与 CFL 稳定性 | |10/28|
-|12| PDE 进阶：隐式时间步（后向  Euler/Crank–Nicolson），每步线性求解；性能与稳定性权衡 | |10/31|
+|9| 常微分方程：Euler、RK2/RK4、局部/全局误差；稳定性与（非）刚性 | [Lecture 8](./08_ode.html) |11/11|
+|10| ODE 参数反演项目实战：以 Logistic/SIR 为例；定义损失、对参数求梯度、识别性问题 | [Lecture 8](./08_ode.html) |11/14|
+|11| 从 ODE 到 PDE：1D 热方程空间离散，显式格式与 CFL 稳定性 |[Lecture 9](./09_pde.html) |11/18|
+|12| PDE 进阶：隐式时间步（后向  Euler/Crank–Nicolson），每步线性求解；性能与稳定性权衡 | [Lecture 9](./09_pde.html) |11/21|

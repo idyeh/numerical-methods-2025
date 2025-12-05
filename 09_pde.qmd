@@ -1,0 +1,3121 @@
+---
+title: "偏微分方程数值解"
+---
+
+# 学习导航
+
+## 核心学习目标
+
+* **基础层**：通过 **1D 热方程**把 ODE 数值法推广到 PDE；掌握显式前向 Euler 的 **CFL 稳定性条件**；理解**隐式时间步进**的权衡。
+* **进阶层**：在 2D 中比较显隐式方法；了解迭代求解器与**预条件器**；探索不同类型 PDE 的数值特性。
+* **拓展层**：用 **JAX** 实现高性能求解器；了解无网格方法；探索反问题与参数估计。
+
+# 一、从 ODE 到 PDE
+
+## 物理动机：热传导问题
+
+### 问题与建模
+
+考虑一根长度为 $L=1$ m 的金属棒，初始时左半部分温度为 $100°\text{C}$，右半部分为 $0°\text{C}$。两端保持 $0°\text{C}$。**问题**：温度分布如何随时间演化？
+
+**物理直觉**：
+
+- 热量从高温区流向低温区
+- 温度梯度越大，热流越快（傅里叶定律）
+- 最终趋向均匀分布（热平衡）
+
+热传导的基本定律：
+
+$$
+\frac{\partial u}{\partial t} = \alpha \frac{\partial^2 u}{\partial x^2}, \quad x \in (0, 1), \; t > 0
+$$
+
+其中：
+
+- $u(x, t)$：位置 $x$ 在时刻 $t$ 的温度
+- $\alpha$：热扩散系数（材料性质，单位 $\text{m}^2/\text{s}$）
+
+**边界条件**：$u(0, t) = u(1, t) = 0$（Dirichlet 边界）
+
+**初始条件**：$u(x, 0) = u_0(x)$
+
+**与 ODE 的对比**
+
+| 特征 | ODE | PDE (1D 热方程) |
+|------|-----|----------------|
+| 自变量 | $t$ | $x, t$ |
+| 未知函数 | $u(t)$ | $u(x, t)$ |
+| 导数类型 | 常微分 | 偏微分 |
+| 典型例子 | $\frac{du}{dt} = -ku$ | $\frac{\partial u}{\partial t} = \alpha \frac{\partial^2 u}{\partial x^2}$ |
+| 离散化策略 | 时间步进 | 空间 + 时间双离散 |
+
+能否先把空间“离散”掉，把 PDE 变成 ODE 系统？
+
+## 半离散化
+
+### 空间网格
+
+在空间区间 $(0, 1)$ 上建立均匀网格：
+
+$$
+x_i = i \Delta x, \quad i = 0, 1, \ldots, N, \quad \Delta x = \frac{1}{N}
+$$
+
+用 $u_i(t) \approx u(x_i, t)$ 表示网格点上的温度。
+
+### 中心差分近似
+
+用有限差分近似空间二阶导数：
+
+$$
+\frac{\partial^2 u}{\partial x^2}\bigg|_{x=x_i} \approx \frac{u_{i-1} - 2u_i + u_{i+1}}{\Delta x^2}
+$$
+
+**推导**（Taylor 展开）：
+
+设 $x$ 方向的步长为 $\Delta x$，
+
+$$
+\begin{aligned}
+u(x_i + \Delta x) &= u(x_i) + u'(x_i)\Delta x + \frac{1}{2}u''(x_i)\Delta x^2 + O(\Delta x^3) \\
+u(x_i - \Delta x) &= u(x_i) - u'(x_i)\Delta x + \frac{1}{2}u''(x_i)\Delta x^2 + O(\Delta x^3)
+\end{aligned}
+$$
+
+相加消去一阶导数项：
+
+$$
+u(x_i + \Delta x) + u(x_i - \Delta x) = 2u(x_i) + u''(x_i)\Delta x^2 + O(\Delta x^4)
+$$
+
+整理得：
+
+$$
+u''(x_i) = \frac{u(x_i - \Delta x) - 2u(x_i) + u(x_i + \Delta x)}{\Delta x^2} + O(\Delta x^2)
+$$
+
+**截断误差**是 $O(\Delta x^2)$，即二阶精度。
+
+### 半离散 ODE 系统
+
+代入 PDE，得到：
+
+$$
+\frac{du_i}{dt} = \alpha \frac{u_{i-1} - 2u_i + u_{i+1}}{\Delta x^2}, \quad i = 1, \ldots, N-1
+$$
+
+边界条件：$u_0(t) = u_N(t) = 0$
+
+若是多个方程，则可以用**矩阵形式**表示 ODE 系统：
+
+$$
+\frac{d\mathbf{u}}{dt} = \alpha L \mathbf{u}, \quad \mathbf{u} = \begin{pmatrix} u_1 \\ u_2 \\ \vdots \\ u_{N-1} \end{pmatrix}
+$$
+
+其中 $L$ 是三对角矩阵：
+
+$$
+L = \frac{1}{\Delta x^2} \begin{pmatrix}
+-2 & 1 & 0 & \cdots & 0 \\
+1 & -2 & 1 & \cdots & 0 \\
+0 & 1 & -2 & \cdots & 0 \\
+\vdots & \vdots & \vdots & \ddots & \vdots \\
+0 & 0 & 0 & \cdots & -2
+\end{pmatrix}
+$$
+
+::: callout-important
+这一步把 PDE 转化为了 **$(N-1)$ 个耦合的常微分方程**！现在可以用 ODE 数值方法求解。
+:::
+
+## 显式时间步进：前向 Euler 法
+
+### 时间离散
+
+对半离散 ODE 系统应用前向 Euler 法：
+
+$$
+\frac{\mathbf{u}^{n+1} - \mathbf{u}^n}{\Delta t} = \alpha L \mathbf{u}^n
+$$
+
+整理得：
+
+$$
+\boxed{\mathbf{u}^{n+1} = \mathbf{u}^n + \Delta t \cdot \alpha L \mathbf{u}^n = (I + r T) \mathbf{u}^n}
+$$
+
+其中：
+
+- $r := \frac{\alpha \Delta t}{\Delta x^2}$（无量纲参数）
+- $T = \Delta x^2 \cdot L = \text{tridiag}(1, -2, 1)$
+
+**分量形式**：
+
+$$
+\boxed{u_i^{n+1} = u_i^n + r(u_{i-1}^n - 2u_i^n + u_{i+1}^n), \quad i = 1, \ldots, N-1}
+$$
+
+### 算法流程
+
+```
+输入：初值 u0, 步长 Δt, 终止时间 T
+输出：各时刻的温度分布
+
+1. 初始化：n = 0, t = 0
+2. 当 t < T 时：
+   2.1 对每个内点 i = 1, ..., N-1：
+       计算 u_i^{n+1} = u_i^n + r(u_{i-1}^n - 2u_i^n + u_{i+1}^n)
+   2.2 保持边界：u_0^{n+1} = u_N^{n+1} = 0
+   2.3 更新：n ← n+1, t ← t + Δt
+3. 返回结果
+```
+
+### 代码实现
+
+```{python}
+import numpy as np
+import matplotlib.pyplot as plt
+
+# 设置中文字体
+plt.rcParams["font.sans-serif"] = ["PingFang SC", "Arial Unicode MS", "SimHei"]
+plt.rcParams["axes.unicode_minus"] = False
+
+
+def heat1d_explicit_v1(u0, alpha=1.0, N=100, T=0.05, dt=None, blow=False):
+    """
+    1D 热方程显式求解器
+    
+    参数：
+        u0: 初值函数（可调用）或数组
+        alpha: 热扩散系数
+        N: 空间网格数（不含边界）
+        T: 终止时间
+        dt: 时间步长（None 则自动选择）
+        blow: 是否故意超过 CFL 条件
+    
+    返回：
+        x: 空间网格点
+        ts: 时间点列表
+        U: 温度历史 (len(ts), N+1)
+        dt: 实际使用的时间步长
+        r: 实际的 r 值
+        dt_cfl: CFL 稳定性阈值
+    """
+    # 构建空间网格
+    x = np.linspace(0, 1, N + 1)
+    dx = x[1] - x[0]
+    
+    # 初始化温度分布
+    if callable(u0):
+        u = u0(x).copy()
+    else:
+        u = np.array(u0, dtype=float)
+    
+    # 强制边界条件
+    u[0] = u[-1] = 0.0
+    
+    # 计算稳定步长（CFL 条件）
+    dt_cfl = dx * dx / (2 * alpha)
+    
+    # 确定实际时间步长
+    if dt is None:
+        if blow:
+            dt = 1.1 * dt_cfl  # 故意超过，演示发散
+        else:
+            dt = 0.9 * dt_cfl  # 稳定步长
+    
+    # 计算无量纲参数
+    r = alpha * dt / (dx * dx)
+    
+    print(f"网格参数：N={N}, Δx={dx:.4f}")
+    print(f"时间参数：Δt={dt:.2e}, r={r:.4f}")
+    print(f"CFL 条件：r ≤ 0.5 → Δt ≤ {dt_cfl:.2e}")
+    
+    if r > 0.5:
+        print(f"警告：r={r:.4f} > 0.5，可能不稳定！")
+    else:
+        print(f"稳定：r={r:.4f} ≤ 0.5")
+    
+    # 存储历史
+    snapshots = [u.copy()]
+    times = [0.0]
+    
+    # 时间步进
+    t = 0.0
+    n_steps = 0
+    
+    while t < T - 1e-12:
+        # 保存旧值
+        u_old = u.copy()
+        
+        # 更新内部点（显式公式）
+        for i in range(1, N):
+            u[i] = u_old[i] + r * (u_old[i-1] - 2*u_old[i] + u_old[i+1])
+        
+        # 保持边界条件
+        u[0] = u[-1] = 0.0
+        
+        # 更新时间
+        t += dt
+        n_steps += 1
+        
+        # 记录快照
+        snapshots.append(u.copy())
+        times.append(t)
+        
+        # 检查数值稳定性
+        if not np.isfinite(u).all():
+            print(f"第 {n_steps} 步出现 NaN/Inf，停止计算！")
+            break
+        
+        if np.max(np.abs(u)) > 1e6:
+            print(f"第 {n_steps} 步数值爆炸（max|u|={np.max(np.abs(u)):.2e}），停止！")
+            break
+    
+    print(f"完成 {n_steps} 步，总时间 t={t:.4f}")
+    
+    return x, np.array(times), np.array(snapshots), dt, r, dt_cfl
+```
+
+### 测试：正弦波初值
+
+热方程的一个重要性质：如果初值为 $u_0(x) = \sin(\pi x)$，则有**解析解**：
+
+$$
+u(x, t) = e^{-\alpha \pi^2 t} \sin(\pi x)
+$$
+
+这为我们提供了验证数值解精度的基准。
+
+```{python}
+# 测试 1：稳定步长
+alpha = 1.0
+u0_func = lambda x: np.sin(np.pi * x)
+
+x, ts_stable, U_stable, dt_stable, r_stable, dt_cfl = heat1d_explicit_v1(
+    u0_func, alpha=alpha, N=100, T=0.05, blow=False
+)
+
+# 测试 2：超出 CFL 条件（演示发散）
+x, ts_unstable, U_unstable, dt_unstable, r_unstable, _ = heat1d_explicit_v1(
+    u0_func, alpha=alpha, N=100, T=0.05, blow=True
+)
+
+# 可视化对比
+fig, axes = plt.subplots(2, 1, figsize=(6, 8))
+
+# 稳定情况
+ax = axes[0]
+ax.plot(x, U_stable[0], "k-", lw=2, label="t=0")
+ax.plot(
+    x,
+    U_stable[len(U_stable) // 4],
+    "b--",
+    label=f"t≈{ts_stable[len(ts_stable) // 4]:.3f}",
+)
+ax.plot(x, U_stable[-1], "r-", label=f"t≈{ts_stable[-1]:.3f}")
+ax.set_xlabel("x")
+ax.set_ylabel("u(x, t)")
+ax.set_title(f"稳定步长：r={r_stable:.3f} ≤ 0.5")
+ax.legend()
+ax.grid(alpha=0.3)
+
+# 不稳定情况
+ax = axes[1]
+ax.plot(x, U_unstable[0], "k-", lw=2, label="t=0")
+if len(U_unstable) > 5:
+    ax.plot(x, U_unstable[5], "r-", label="几步之后")
+ax.set_xlabel("x")
+ax.set_ylabel("u(x, t)")
+ax.set_title(f"超出 CFL：r={r_unstable:.3f} > 0.5（发散！）")
+ax.legend()
+ax.grid(alpha=0.3)
+
+plt.tight_layout()
+plt.show()
+```
+
+### 代码实现（NumPy 向量化）
+
+上述代码使用显式循环，便于理解但效率较低。利用 NumPy 的切片操作可以消除循环：
+
+```{python}
+def heat1d_explicit_v2(u0, alpha=1.0, N=100, T=0.05, dt=None, blow=False):
+    """
+    1D 热方程显式求解器（NumPy 向量化）
+    
+    核心改进：用数组切片代替 for 循环
+    """
+    x = np.linspace(0, 1, N + 1)
+    dx = x[1] - x[0]
+    
+    if callable(u0):
+        u = u0(x).astype(float)
+    else:
+        u = np.array(u0, dtype=float)
+    
+    u[0] = u[-1] = 0.0
+    
+    # CFL 条件
+    dt_cfl = dx * dx / (2 * alpha)
+    if dt is None:
+        dt = 0.9 * dt_cfl if not blow else 1.1 * dt_cfl
+    
+    r = alpha * dt / (dx * dx)
+    
+    snapshots = [u.copy()]
+    times = [0.0]
+    t = 0.0
+    
+    while t < T - 1e-12:
+        # 向量化更新
+        # u[1:-1] 选中所有内部点
+        # u[:-2] 对应 u_{i-1}
+        # u[2:] 对应 u_{i+1}
+        u[1:-1] = u[1:-1] + r * (u[:-2] - 2*u[1:-1] + u[2:])
+        
+        # 边界条件（实际上如果初始化正确，这里可以省略）
+        u[0] = u[-1] = 0.0
+        
+        t += dt
+        snapshots.append(u.copy())
+        times.append(t)
+        
+        # 稳定性检查
+        if not np.isfinite(u).all() or np.max(np.abs(u)) > 1e6:
+            break
+    
+    return x, np.array(times), np.array(snapshots), dt, r, dt_cfl
+```
+
+**性能对比**：
+
+```{python}
+import time
+
+N = 1000
+u0 = lambda x: np.sin(np.pi * x)
+T_test = 0.01
+
+# 版本 1（循环）
+t0 = time.time()
+_ = heat1d_explicit_v1(u0, alpha=1.0, N=N, T=T_test)
+time_v1 = time.time() - t0
+
+# 版本 2（向量化）
+t0 = time.time()
+_ = heat1d_explicit_v2(u0, alpha=1.0, N=N, T=T_test)
+time_v2 = time.time() - t0
+
+print(f"版本 1（循环）：{time_v1:.4f} 秒")
+print(f"版本 2（向量化）：{time_v2:.4f} 秒")
+print(f"加速比：{time_v1 / time_v2:.1f}x")
+```
+
+::: callout-note
+向量化版本通常快一个数量级。
+:::
+
+## 稳定性分析
+
+### Von Neumann 稳定性分析
+
+::: callout-note
+为什么显式方法要求 $r \leq \frac{1}{2}$？这是如何推导出来的？
+:::
+
+**核心思想**：将误差展开为 Fourier 模态，分析每个模态的增长。
+
+**步骤 1**：假设误差形式为
+
+$$
+\epsilon_j^n = \xi^n e^{i k j \Delta x}
+$$
+
+其中 $\xi$ 是增长因子，$k$ 是波数。
+
+**步骤 2**：代入差分格式
+
+$$
+\epsilon_j^{n+1} = \epsilon_j^n + r(\epsilon_{j-1}^n - 2\epsilon_j^n + \epsilon_{j+1}^n)
+$$
+
+得到：
+
+$$
+\xi^{n+1} e^{ikj\Delta x} = \xi^n e^{ikj\Delta x} + r\xi^n \left( e^{ik(j-1)\Delta x} - 2e^{ikj\Delta x} + e^{ik(j+1)\Delta x} \right)
+$$
+
+**步骤 3**：约去公因子
+
+$$
+\xi = 1 + r(e^{-ik\Delta x} - 2 + e^{ik\Delta x})
+$$
+
+利用 $e^{i\theta} + e^{-i\theta} = 2\cos\theta$：
+
+$$
+\xi = 1 + r(2\cos(k\Delta x) - 2) = 1 - 4r\sin^2\left(\frac{k\Delta x}{2}\right)
+$$
+
+**步骤 4**：稳定性条件
+
+要求 $|\xi| \leq 1$ 对所有 $k$ 成立。由于 $\sin^2 \in [0, 1]$，最坏情况是 $\sin^2 = 1$：
+
+$$
+|1 - 4r| \leq 1 \quad \Rightarrow \quad -1 \leq 1 - 4r \leq 1
+$$
+
+解得：
+
+$$
+\boxed{r \leq \frac{1}{2} \quad \Leftrightarrow \quad \Delta t \leq \frac{\Delta x^2}{2\alpha}}
+$$
+
+### 物理意义
+
+CFL 条件的物理解释：
+
+- 数值扩散速度：$\displaystyle\frac{\Delta x}{\Delta t}$
+- 物理扩散速度：$\displaystyle\frac{\alpha}{\Delta x}$（特征长度/时间）
+
+稳定性要求数值速度不能超过物理速度：
+
+$$
+\frac{\Delta x}{\Delta t} \gtrsim \frac{\alpha}{\Delta x} \quad \Rightarrow \quad \Delta t \lesssim \frac{\Delta x^2}{\alpha}
+$$
+
+::: callout-important
+网格加密一倍（$\Delta x \to \Delta x/2$），时间步长需缩小四倍（$\Delta t \to \Delta t/4$）。
+:::
+
+### 实验：临界稳定性
+
+```{python}
+def cfl_experiment():
+    """
+    实验：测试不同 r 值的稳定性
+    """
+    r_values = [0.45, 0.50, 0.55, 0.60]
+
+    fig, axes = plt.subplots(2, 2, figsize=(9, 7))
+    axes = axes.flatten()
+
+    for i, r_test in enumerate(r_values):
+        ax = axes[i]
+
+        # 固定 N，通过调整 dt 来改变 r
+        N = 100
+        dx = 1 / N
+        dt_test = r_test * dx**2 / 1.0  # alpha=1
+
+        try:
+            x, ts, U, _, _, _ = heat1d_explicit_v2(
+                lambda x: np.sin(np.pi * x), alpha=1.0, N=N, T=0.02, dt=dt_test
+            )
+
+            # 绘制几个时刻
+            ax.plot(x, U[0], "k-", lw=2, label="t=0", alpha=0.7)
+
+            if len(U) > 10:
+                ax.plot(x, U[len(U) // 3], "b--", label="中期")
+                ax.plot(x, U[-1], "r-", label="末期")
+            else:
+                ax.plot(x, U[-1], "r-", label="发散前")
+
+            ax.set_ylim(-2, 2)
+
+            if r_test <= 0.5:
+                ax.set_title(f"稳定：r={r_test:.2f} ≤ 0.5", color="green")
+            else:
+                ax.set_title(f"不稳定：r={r_test:.2f} > 0.5", color="red")
+
+        except:
+            ax.text(
+                0.5,
+                0.5,
+                "数值溢出！",
+                ha="center",
+                va="center",
+                fontsize=20,
+                color="red",
+            )
+            ax.set_title(f"发散：r={r_test:.2f}", color="red")
+
+        ax.set_xlabel("x")
+        ax.set_ylabel("u(x, t)")
+        ax.legend()
+        ax.grid(alpha=0.3)
+
+    plt.tight_layout()
+    plt.show()
+
+
+cfl_experiment()
+```
+
+## JAX 实现初探
+
+### JAX 基础配置
+
+```{python}
+try:
+    import jax
+    import jax.numpy as jnp
+    from jax import jit
+    
+    # 重要：启用 64 位精度（默认是 32 位）
+    jax.config.update("jax_enable_x64", True)
+    
+    print(f"JAX 版本：{jax.__version__}")
+    print(f"运行设备：{jax.devices()}")
+    print(f"64 位模式：{jax.config.read('jax_enable_x64')}")
+    
+    JAX_AVAILABLE = True
+
+except ImportError:
+    print("JAX 未安装，跳过 JAX 相关内容")
+    JAX_AVAILABLE = False
+```
+
+### JAX 版本的实现
+
+```{python}
+if JAX_AVAILABLE:
+    @jit
+    def heat1d_step_jax(u, r):
+        """
+        单步更新函数（纯函数，可 JIT 编译）
+        
+        注意：
+        1. JAX 数组是不可变的，用 .at[].set() 更新
+        2. 函数必须是纯函数（无副作用）
+        """
+        # 计算新值（向量化）
+        u_new = u.at[1:-1].set(
+            u[1:-1] + r * (u[:-2] - 2*u[1:-1] + u[2:])
+        )
+        
+        # 强制边界为 0
+        u_new = u_new.at[0].set(0.0).at[-1].set(0.0)
+        
+        return u_new
+    
+    
+    def heat1d_explicit_jax(u0, alpha=1.0, N=100, T=0.05, dt=None):
+        """JAX 版显式求解器"""
+        x = jnp.linspace(0, 1, N + 1)
+        dx = float(x[1] - x[0])
+        
+        if callable(u0):
+            u = jnp.array(u0(np.array(x)))
+        else:
+            u = jnp.array(u0)
+        
+        u = u.at[0].set(0.0).at[-1].set(0.0)
+        
+        dt_cfl = dx**2 / (2 * alpha)
+        if dt is None:
+            dt = 0.9 * dt_cfl
+        
+        r = alpha * dt / dx**2
+        
+        # 时间步进（每步都会触发 JIT 编译，首次较慢）
+        n_steps = int(T / dt)
+        
+        for _ in range(n_steps):
+            u = heat1d_step_jax(u, r)
+        
+        return np.array(u)  # 转回 NumPy 用于绘图
+```
+
+### 性能对比
+
+```{python}
+if JAX_AVAILABLE:
+    import time
+    
+    N = 2000
+    u0 = lambda x: np.sin(np.pi * x)
+    T_test = 0.01
+    
+    # NumPy 版本
+    t0 = time.time()
+    u_numpy = heat1d_explicit_v2(u0, N=N, T=T_test)[2][-1]
+    time_numpy = time.time() - t0
+    
+    # JAX 版本（包含首次编译时间）
+    t0 = time.time()
+    u_jax = heat1d_explicit_jax(u0, N=N, T=T_test)
+    time_jax_cold = time.time() - t0
+    
+    # JAX 版本（预热后）
+    t0 = time.time()
+    u_jax = heat1d_explicit_jax(u0, N=N, T=T_test)
+    time_jax_warm = time.time() - t0
+    
+    print(f"NumPy：{time_numpy:.4f} 秒")
+    print(f"JAX（首次含编译）：{time_jax_cold:.4f} 秒")
+    print(f"JAX（预热后）：{time_jax_warm:.4f} 秒")
+    print(f"加速比：{time_numpy / time_jax_warm:.1f}x")
+    
+    # 验证结果一致性
+    print(f"误差：{np.max(np.abs(u_numpy - u_jax)):.2e}")
+```
+
+**观察结果**：
+
+- 首次运行：JAX 可能更慢（编译开销）
+- 预热后：JAX 快 3-10 倍（取决于硬件）
+
+### 小结
+
+**核心概念**：
+
+1. **半离散化**：空间离散 → ODE 系统
+2. **显式方法**：每步直接更新，无需解方程
+3. **CFL 条件**：$r \leq 1/2$ 保证稳定性
+4. **向量化**：消除循环，提升性能
+
+**自检问题**：
+
+1. 为什么中心差分的截断误差是 $O(\Delta x^2)$？
+2. Von Neumann 分析的物理意义是什么？
+3. 网格加密 2 倍，计算时间增加多少倍？
+
+**深入探索**：
+
+- [Strang 的《计算科学与工程》](http://math.mit.edu/~gs/cse/)第6章
+- JAX 官方教程：[quickstart](https://jax.readthedocs.io/en/latest/notebooks/quickstart.html)
+
+# 二、隐式时间步进
+
+## 动机：显式方法的困境
+
+### 高分辨率仿真的挑战
+
+考虑一个实际问题：仿真1秒钟的热传导过程，需要多少时间步？
+
+```{python}
+def cfl_cost_analysis():
+    """分析不同分辨率下的计算成本"""
+    print("=" * 70)
+    print("CFL 条件对计算成本的影响")
+    print("=" * 70)
+    print(f"{'N':<8} {'Δx':<12} {'Δt_CFL':<12} {'步数/秒':<12} {'假设时间':<12}")
+    print("-" * 70)
+    
+    for N in [100, 500, 1000, 5000, 10000]:
+        dx = 1 / N
+        dt_cfl = 0.5 * dx**2 / 1.0  # alpha=1
+        steps_per_sec = int(1.0 / dt_cfl)
+        
+        # 假设每步 0.1 毫秒
+        total_time_sec = steps_per_sec * 0.0001
+        
+        if total_time_sec < 60:
+            time_str = f"{total_time_sec:.2f} 秒"
+        elif total_time_sec < 3600:
+            time_str = f"{total_time_sec/60:.2f} 分钟"
+        else:
+            time_str = f"{total_time_sec/3600:.2f} 小时"
+        
+        print(f"{N:<8} {dx:.2e}  {dt_cfl:.2e}  {steps_per_sec:<12.2e} {time_str}")
+    
+    print("=" * 70)
+    print("观察：N 增加 10 倍 → 步数增加 100 倍 → 计算时间增加 100 倍")
+
+cfl_cost_analysis()
+```
+
+这就是所谓的“刚性问题”（stiff problem）。
+
+### 解决思路
+
+**问题根源**：显式方法的稳定性受限于 CFL 条件。
+
+**解决方案**：使用**隐式方法**（Implicit Methods），允许更大的时间步长。
+
+**代价**：每步需要解线性方程组。
+
+**权衡**：
+
+- 显式：每步便宜，但步数多
+- 隐式：每步贵，但步数少
+
+哪个更优？取决于具体问题。
+
+## 后向 Euler 法
+
+### 方法推导
+
+前向 Euler（显式）：
+
+$$
+\frac{\mathbf{u}^{n+1} - \mathbf{u}^n}{\Delta t} = \alpha L \mathbf{u}^n
+$$
+
+后向 Euler（隐式）：用 $\mathbf{u}^{n+1}$ 代替右侧的 $\mathbf{u}^n$：
+
+$$
+\frac{\mathbf{u}^{n+1} - \mathbf{u}^n}{\Delta t} = \alpha L \mathbf{u}^{n+1}
+$$
+
+整理得：
+
+$$
+\boxed{(I - \Delta t \cdot \alpha L) \mathbf{u}^{n+1} = \mathbf{u}^n}
+$$
+
+或记 $r = \frac{\alpha \Delta t}{\Delta x^2}$，$T = \Delta x^2 L$：
+
+$$
+\boxed{(I - r T) \mathbf{u}^{n+1} = \mathbf{u}^n}
+$$
+
+其中 $T = \text{tridiag}(1, -2, 1)$。
+
+### 三对角线性系统
+
+展开后，每步需要解：
+
+$$
+\begin{pmatrix}
+1+2r & -r & 0 & \cdots & 0 \\
+-r & 1+2r & -r & \cdots & 0 \\
+0 & -r & 1+2r & \cdots & 0 \\
+\vdots & \vdots & \vdots & \ddots & \vdots \\
+0 & 0 & 0 & \cdots & 1+2r
+\end{pmatrix}
+\begin{pmatrix}
+u_1^{n+1} \\
+u_2^{n+1} \\
+u_3^{n+1} \\
+\vdots \\
+u_{N-1}^{n+1}
+\end{pmatrix}
+=
+\begin{pmatrix}
+u_1^n \\
+u_2^n \\
+u_3^n \\
+\vdots \\
+u_{N-1}^n
+\end{pmatrix}
+$$
+
+### Thomas 算法
+
+对于三对角系统 $A\mathbf{x} = \mathbf{d}$，Thomas 算法（追赶法）是 $O(N)$ 的直接解法：
+
+$$
+A = \begin{pmatrix}
+b_1 & c_1 & 0 & \cdots \\
+a_1 & b_2 & c_2 & \cdots \\
+0 & a_2 & b_3 & \cdots \\
+\vdots & \vdots & \vdots & \ddots
+\end{pmatrix}
+$$
+
+**算法描述**：
+
+```
+前向消元（Forward Sweep）：
+    c'_1 = c_1 / b_1
+    d'_1 = d_1 / b_1
+    for i = 2 to n:
+        m = b_i - a_{i-1} * c'_{i-1}
+        c'_i = c_i / m
+        d'_i = (d_i - a_{i-1} * d'_{i-1}) / m
+
+后向回代（Back Substitution）：
+    x_n = d'_n
+    for i = n-1 down to 1:
+        x_i = d'_i - c'_i * x_{i+1}
+```
+
+**代码实现**：
+
+```{python}
+def thomas_solve(a, b, c, d):
+    """
+    解三对角系统 A*x = d
+    
+    参数：
+        a: 下对角线（长度 n-1）
+        b: 主对角线（长度 n）
+        c: 上对角线（长度 n-1）
+        d: 右侧向量（长度 n）
+    
+    返回：
+        x: 解向量（长度 n）
+    
+    复杂度：O(n) 时间，O(n) 空间
+    """
+    n = len(b)
+    
+    # 工作数组
+    c_prime = np.zeros(n - 1)
+    d_prime = np.zeros(n)
+    x = np.zeros(n)
+    
+    # 前向消元
+    c_prime[0] = c[0] / b[0]
+    d_prime[0] = d[0] / b[0]
+    
+    for i in range(1, n - 1):
+        denom = b[i] - a[i-1] * c_prime[i-1]
+        c_prime[i] = c[i] / denom
+        d_prime[i] = (d[i] - a[i-1] * d_prime[i-1]) / denom
+    
+    # 最后一行（无 c[n-1]）
+    d_prime[n-1] = (d[n-1] - a[n-2] * d_prime[n-2]) / \
+                   (b[n-1] - a[n-2] * c_prime[n-2])
+    
+    # 后向回代
+    x[n-1] = d_prime[n-1]
+    for i in range(n - 2, -1, -1):
+        x[i] = d_prime[i] - c_prime[i] * x[i+1]
+    
+    return x
+```
+
+### BE 求解器
+
+```{python}
+def heat1d_implicit_be(u0, alpha=1.0, N=200, T=0.05, dt=1e-4):
+    """
+    1D 热方程后向 Euler 隐式求解器
+
+    特点：
+    1. 无条件稳定（可用任意 Δt）
+    2. 每步需解三对角系统（Thomas 算法）
+    3. 时间一阶精度 O(Δt)
+    """
+    x = np.linspace(0, 1, N + 1)
+    dx = x[1] - x[0]
+
+    if callable(u0):
+        u = u0(x).astype(float)
+    else:
+        u = np.array(u0, dtype=float)
+
+    u[0] = u[-1] = 0.0
+
+    r = alpha * dt / (dx * dx)
+
+    # 构建三对角系数（固定，只需计算一次）
+    n_interior = N - 1
+    a = -r * np.ones(n_interior - 1)  # 下对角
+    b = (1 + 2 * r) * np.ones(n_interior)  # 主对角
+    c = -r * np.ones(n_interior - 1)  # 上对角
+
+    snapshots = [u.copy()]
+    times = [0.0]
+    t = 0.0
+
+    print(f"BE 求解器：N={N}, Δt={dt:.2e}, r={r:.4f}")
+
+    while t < T - 1e-12:
+        # 构建右侧向量（每步都变化）
+        rhs = u[1:-1].copy()
+
+        # 如果边界非零，需要修正 RHS（这里边界=0，无需修正）
+        # rhs[0] += r * u[0]
+        # rhs[-1] += r * u[-1]
+
+        # 解三对角系统
+        u[1:-1] = thomas_solve(a, b, c, rhs)
+
+        t += dt
+        snapshots.append(u.copy())
+        times.append(t)
+
+    print(f"完成 {len(times) - 1} 步，总时间 t={t:.4f}")
+
+    return x, np.array(times), np.array(snapshots), r
+```
+
+### 稳定性分析
+
+对 BE 方法进行 Von Neumann 分析：
+
+$$
+\xi^{n+1} e^{ikj\Delta x} = \xi^n e^{ikj\Delta x} + r \xi^{n+1} (e^{-ik\Delta x} - 2 + e^{ik\Delta x})e^{ikj\Delta x}
+$$
+
+整理：
+
+$$
+\xi = 1 + r\xi(2\cos(k\Delta x) - 2) = 1 - 4r\sin^2\left(\frac{k\Delta x}{2}\right) \xi
+$$
+
+解得：
+
+$$
+\xi = \frac{1}{1 + 4r\sin^2(k\Delta x/2)}
+$$
+
+**关键性质**：$0 < \xi < 1$ 对所有 $r > 0$ 和所有 $k$ 成立！
+
+::: callout-important
+**结论**：BE 方法是**无条件稳定**（A-stable）的，可以使用任意大的 $\Delta t$！
+:::
+
+## Crank-Nicolson 方法
+
+### 梯形法则
+
+BE 方法虽然稳定，但时间精度只有 $O(\Delta t)$。能否在保持稳定性的同时提升精度？
+
+Crank-Nicolson 方法（CN）基于**梯形法则**（Trapezoidal Rule）：
+
+$$
+\frac{\mathbf{u}^{n+1} - \mathbf{u}^n}{\Delta t} = \frac{1}{2}\left( \alpha L \mathbf{u}^n + \alpha L \mathbf{u}^{n+1} \right)
+$$
+
+即在 $t^n$ 和 $t^{n+1}$ 两个时刻的导数平均值。
+
+整理得：
+
+$$
+\boxed{\left(I - \frac{r}{2}T\right) \mathbf{u}^{n+1} = \left(I + \frac{r}{2}T\right) \mathbf{u}^n}
+$$
+
+### 时间二阶精度
+
+**定理**：CN 方法的局部截断误差为 $O(\Delta t^3)$，全局误差为 $O(\Delta t^2)$。
+
+简化的证明思路，依靠 Taylor 展开：
+
+$$
+u^{n+1} = u^n + \Delta t \, u'(t^n) + \frac{\Delta t^2}{2} u''(t^n) + \frac{\Delta t^3}{6} u'''(t^n) + O(\Delta t^4)
+$$
+
+梯形法则使用：
+
+$$
+u'(t) \approx \frac{u'(t^n) + u'(t^{n+1})}{2}
+$$
+
+代入并展开，可证明 $O(\Delta t^3)$ 项相消。
+
+### 代码实现
+
+```{python}
+def heat1d_implicit_cn(u0, alpha=1.0, N=200, T=0.05, dt=1e-4):
+    """
+    1D 热方程 Crank-Nicolson 隐式求解器
+    
+    特点：
+    1. 无条件稳定
+    2. 时间二阶精度 O(Δt²)
+    3. 每步需解三对角系统
+    """
+    x = np.linspace(0, 1, N + 1)
+    dx = x[1] - x[0]
+    
+    if callable(u0):
+        u = u0(x).astype(float)
+    else:
+        u = np.array(u0, dtype=float)
+    
+    u[0] = u[-1] = 0.0
+    
+    r = alpha * dt / (dx * dx)
+    n_interior = N - 1
+    
+    # 左侧矩阵 (I - r/2 * T)
+    a_left = (-r/2) * np.ones(n_interior - 1)
+    b_left = (1 + r) * np.ones(n_interior)
+    c_left = (-r/2) * np.ones(n_interior - 1)
+    
+    # 右侧矩阵 (I + r/2 * T)（用于矩阵-向量乘法）
+    A_right = (1 - r) * np.eye(n_interior) + \
+              (r/2) * (np.diag(np.ones(n_interior-1), -1) + 
+                       np.diag(np.ones(n_interior-1), 1))
+    
+    snapshots = [u.copy()]
+    times = [0.0]
+    t = 0.0
+    
+    print(f"CN 求解器：N={N}, Δt={dt:.2e}, r={r:.4f}")
+    print(f"时间二阶精度，比 BE 更准确")
+    
+    while t < T - 1e-12:
+        # 右侧向量
+        rhs = A_right @ u[1:-1]
+        
+        # 解三对角系统
+        u[1:-1] = thomas_solve(a_left, b_left, c_left, rhs)
+        
+        t += dt
+        snapshots.append(u.copy())
+        times.append(t)
+    
+    print(f"完成 {len(times)-1} 步")
+    
+    return x, np.array(times), np.array(snapshots), r
+```
+
+## 方法对比
+
+### 理论对比表
+
+| 方法 | 时间精度 | 空间精度 | 稳定性 | 每步成本 | CFL 限制 |
+|------|---------|---------|-------|---------|---------|
+| 显式 Euler | $O(\Delta t)$ | $O(\Delta x^2)$ | 条件稳定 | 低（仅向量运算） | $r \leq 1/2$ |
+| 后向 Euler | $O(\Delta t)$ | $O(\Delta x^2)$ | 无条件稳定 | 中（解三对角） | 无 |
+| Crank-Nicolson | $O(\Delta t^2)$ | $O(\Delta x^2)$ | 无条件稳定 | 中（解三对角） | 无 |
+
+### 数值实验：收敛性测试
+
+```{python}
+def convergence_test():
+    """
+    测试不同方法的收敛阶
+    """
+    alpha = 1.0
+    u0 = lambda x: np.sin(np.pi * x)
+
+    # 解析解
+    def u_exact(x, t):
+        return np.exp(-alpha * np.pi**2 * t) * np.sin(np.pi * x)
+
+    T_final = 0.1
+    N = 200  # 固定空间分辨率
+
+    # 测试不同时间步长
+    dt_values = [0.01, 0.005, 0.0025, 0.00125]
+
+    errors_explicit = []
+    errors_be = []
+    errors_cn = []
+
+    for dt in dt_values:
+        # 显式（需检查 CFL）
+        dx = 1 / N
+        r = alpha * dt / dx**2
+        if r <= 0.5:
+            _, _, U_exp, _ = heat1d_explicit_v2(u0, alpha, N, T_final, dt=dt)
+            x = np.linspace(0, 1, N + 1)
+            err_exp = np.max(np.abs(U_exp[-1] - u_exact(x, T_final)))
+            errors_explicit.append(err_exp)
+        else:
+            errors_explicit.append(np.nan)
+
+        # BE
+        x, _, U_be, _ = heat1d_implicit_be(u0, alpha, N, T_final, dt)
+        err_be = np.max(np.abs(U_be[-1] - u_exact(x, T_final)))
+        errors_be.append(err_be)
+
+        # CN
+        x, _, U_cn, _ = heat1d_implicit_cn(u0, alpha, N, T_final, dt)
+        err_cn = np.max(np.abs(U_cn[-1] - u_exact(x, T_final)))
+        errors_cn.append(err_cn)
+
+    # 绘制收敛曲线
+    plt.figure(figsize=(5, 4))
+
+    plt.loglog(dt_values, errors_explicit, "o-", label="显式 Euler", lw=2)
+    plt.loglog(dt_values, errors_be, "s-", label="后向 Euler (BE)", lw=2)
+    plt.loglog(dt_values, errors_cn, "^-", label="Crank-Nicolson (CN)", lw=2)
+
+    # 参考线
+    plt.loglog(
+        dt_values, [dt for dt in dt_values], "k--", label="O(Δt)  一阶", alpha=0.5
+    )
+    plt.loglog(
+        dt_values, [dt**2 for dt in dt_values], "k:", label="O(Δt²) 二阶", alpha=0.5
+    )
+
+    plt.xlabel("时间步长 Δt", fontsize=12)
+    plt.ylabel("最大误差 ||u - u_exact||∞", fontsize=12)
+    plt.title("收敛性测试：不同方法的时间精度", fontsize=14)
+    plt.legend(fontsize=10)
+    plt.grid(True, which="both", alpha=0.3)
+    plt.tight_layout()
+    plt.show()
+
+    # 打印收敛阶
+    print("=" * 60)
+    print("收敛阶估计（通过相邻误差比）")
+    print("=" * 60)
+    for i in range(len(dt_values) - 1):
+        if not np.isnan(errors_explicit[i]):
+            order_exp = np.log(errors_explicit[i] / errors_explicit[i + 1]) / np.log(
+                dt_values[i] / dt_values[i + 1]
+            )
+        else:
+            order_exp = np.nan
+
+        order_be = np.log(errors_be[i] / errors_be[i + 1]) / np.log(
+            dt_values[i] / dt_values[i + 1]
+        )
+
+        order_cn = np.log(errors_cn[i] / errors_cn[i + 1]) / np.log(
+            dt_values[i] / dt_values[i + 1]
+        )
+
+        print(f"Δt: {dt_values[i]:.4f} → {dt_values[i + 1]:.4f}")
+        print(f"  显式：{order_exp:.2f}  BE：{order_be:.2f}  CN：{order_cn:.2f}")
+    print("=" * 60)
+    print("理论预测：显式≈1, BE≈1, CN≈2")
+
+
+convergence_test()
+```
+
+### 性能对比
+
+```{python}
+def performance_comparison():
+    """
+    对比不同方法达到相同精度的计算时间
+    """
+    import time
+
+    alpha = 1.0
+    u0 = lambda x: np.sin(np.pi * x)
+    T_final = 0.1
+    N = 500
+    target_error = 1e-4
+
+    # 解析解
+    u_exact = lambda x, t: np.exp(-alpha * np.pi**2 * t) * np.sin(np.pi * x)
+    x = np.linspace(0, 1, N + 1)
+
+    results = []
+
+    # 显式：需要小步长
+    dx = 1 / N
+    dt_explicit = 0.4 * dx**2  # 稳定步长
+    t0 = time.time()
+    _, _, U_exp, *_ = heat1d_explicit_v2(u0, alpha, N, T_final, dt=dt_explicit)
+    time_explicit = time.time() - t0
+    err_explicit = np.max(np.abs(U_exp[-1] - u_exact(x, T_final)))
+    results.append(
+        (
+            "显式 Euler",
+            dt_explicit,
+            int(T_final / dt_explicit),
+            time_explicit,
+            err_explicit,
+        )
+    )
+
+    # BE：可用大步长，但精度低
+    dt_be = 0.01
+    t0 = time.time()
+    _, _, U_be, *_ = heat1d_implicit_be(u0, alpha, N, T_final, dt_be)
+    time_be = time.time() - t0
+    err_be = np.max(np.abs(U_be[-1] - u_exact(x, T_final)))
+    results.append(("后向 Euler", dt_be, int(T_final / dt_be), time_be, err_be))
+
+    # CN：大步长+高精度
+    dt_cn = 0.01
+    t0 = time.time()
+    _, _, U_cn, *_ = heat1d_implicit_cn(u0, alpha, N, T_final, dt_cn)
+    time_cn = time.time() - t0
+    err_cn = np.max(np.abs(U_cn[-1] - u_exact(x, T_final)))
+    results.append(("Crank-Nicolson", dt_cn, int(T_final / dt_cn), time_cn, err_cn))
+
+    # 打印结果
+    print("=" * 80)
+    print(f"{'方法':<18} {'Δt':<10} {'步数':<8} {'时间(s)':<10} {'误差':<12}")
+    print("=" * 80)
+    for method, dt, steps, t, err in results:
+        print(f"{method:<18} {dt:<10.2e} {steps:<8} {t:<10.4f} {err:<12.2e}")
+    print("=" * 80)
+
+performance_comparison()
+```
+
+**观察**：
+
+  - 显式方法：步数多，但每步快
+  - BE：步数少，但精度不如 CN
+  - CN：综合性能最优（步数少+精度高）
+
+## JAX 实现隐式方法
+
+### 挑战
+
+隐式方法每步需要解线性系统，如何在 JAX 中高效实现？
+
+### JAX 线性求解器
+
+```{python}
+if JAX_AVAILABLE:
+    from jax.scipy.linalg import solve
+    
+    @jit
+    def cn_step_jax(u, A_left, A_right):
+        """
+        Crank-Nicolson 单步（JAX 版本）
+        
+        注意：
+        1. 矩阵需要预先构建（不在 JIT 函数内部）
+        2. jax.scipy.linalg.solve 支持 JIT 编译
+        """
+        # 右侧向量
+        rhs = A_right @ u[1:-1]
+        
+        # 解线性系统
+        u_new_interior = solve(A_left, rhs)
+        
+        # 更新（JAX 不可变数组）
+        u_new = u.at[1:-1].set(u_new_interior)
+        u_new = u_new.at[0].set(0.0).at[-1].set(0.0)
+        
+        return u_new
+    
+    
+    def heat1d_cn_jax(u0, alpha=1.0, N=200, T=0.05, dt=1e-4):
+        """JAX 版 Crank-Nicolson 求解器"""
+        x = jnp.linspace(0, 1, N + 1)
+        dx = float(x[1] - x[0])
+        
+        if callable(u0):
+            u = jnp.array(u0(np.array(x)))
+        else:
+            u = jnp.array(u0)
+        
+        u = u.at[0].set(0.0).at[-1].set(0.0)
+        
+        r = alpha * dt / dx**2
+        n_int = N - 1
+        
+        # 构建矩阵（只需一次）
+        A_left = ((1 + r) * jnp.eye(n_int) - 
+                  (r/2) * (jnp.eye(n_int, k=1) + jnp.eye(n_int, k=-1)))
+        
+        A_right = ((1 - r) * jnp.eye(n_int) + 
+                   (r/2) * (jnp.eye(n_int, k=1) + jnp.eye(n_int, k=-1)))
+        
+        # 时间步进
+        n_steps = int(T / dt)
+        
+        for _ in range(n_steps):
+            u = cn_step_jax(u, A_left, A_right)
+        
+        return np.array(u)
+```
+
+### 性能对比
+
+```{python}
+if JAX_AVAILABLE:
+    import time
+    
+    N = 500
+    u0 = lambda x: np.sin(np.pi * x)
+    T_test = 0.01
+    dt = 1e-4
+    
+    # NumPy 版本
+    t0 = time.time()
+    u_numpy = heat1d_implicit_cn(u0, N=N, T=T_test, dt=dt)[2][-1]
+    time_numpy = time.time() - t0
+    
+    # JAX 版本（预热）
+    _ = heat1d_cn_jax(u0, N=N, T=T_test, dt=dt)
+    
+    t0 = time.time()
+    u_jax = heat1d_cn_jax(u0, N=N, T=T_test, dt=dt)
+    time_jax = time.time() - t0
+    
+    print(f"NumPy CN：{time_numpy:.4f} 秒")
+    print(f"JAX CN（预热后）：{time_jax:.4f} 秒")
+    print(f"加速比：{time_numpy / time_jax:.1f}x")
+    print(f"误差：{np.max(np.abs(u_numpy - u_jax)):.2e}")
+```
+
+### 小结
+
+**核心概念**：
+
+1. **隐式方法**：在 $t^{n+1}$ 时刻评估导数，无条件稳定
+2. **Thomas 算法**：$O(N)$ 求解三对角系统
+3. **BE vs CN**：一阶 vs 二阶时间精度
+4. **权衡**：步数 vs 每步成本
+
+**方法选择指南**：
+
+- **显式**：非刚性问题、需要细粒度时间分辨率
+- **BE**：刚性问题、快速达到稳态
+- **CN**：高精度需求、平衡性能和精度
+
+**自检问题**：
+
+1. 为什么 BE 方法无条件稳定？
+2. Thomas 算法的复杂度是多少？
+3. CN 方法的时间精度为何是 $O(\Delta t^2)$？
+4. 什么情况下隐式方法比显式方法更快？
+
+**深入探索**：
+
+- [Hairer & Wanner 的《Solving ODEs》](https://www.springer.com/gp/book/9783540566700)第 IV 章
+- A-stability, L-stability 理论
+- IMEX（Implicit-Explicit）方法
+
+
+# 三、2D 热传导
+
+## 从 1D 到 2D：问题复杂度跃升
+
+### 物理场景
+
+考虑一块 $1 \times 1$ m² 的金属板，初始时中心有一个热斑，四周边界保持 $0°\text{C}$。
+
+**数学模型**：
+
+$$
+\frac{\partial u}{\partial t} = \alpha \left( \frac{\partial^2 u}{\partial x^2} + \frac{\partial^2 u}{\partial y^2} \right), \quad (x,y) \in (0,1)^2, \; t > 0
+$$
+
+边界条件：$u|_{\partial\Omega} = 0$（四周）
+
+初始条件：$u(x, y, 0) = u_0(x, y)$，例如
+
+$$
+u_0(x, y) = \exp\left(-\beta[(x-0.5)^2 + (y-0.5)^2]\right), \quad \beta = 200
+$$
+
+### 复杂度对比
+
+| 特征 | 1D | 2D |
+|------|----|----|
+| 网格点数 | $N$ | $N_x \times N_y$ |
+| 未知量数 | $N-1$ | $(N_x-1)(N_y-1)$ |
+| 矩阵大小 | $(N-1) \times (N-1)$ | $(N_x-1)(N_y-1) \times (N_x-1)(N_y-1)$ |
+| 矩阵结构 | 三对角 | 五对角带状 |
+| 直接求解 | $O(N)$ | $O(N^3)$，不可行 |
+| 推荐求解 | Thomas 算法 | 迭代法（CG, GMR继续ES等） |
+
+**示例**：
+
+- 1D, $N=100$：矩阵 $99 \times 99 \approx 10^4$ 个元素
+- 2D, $N_x = N_y = 100$：矩阵 $9801 \times 9801 \approx 10^8$ 个元素
+
+### 矩阵结构可视化
+
+```{python}
+def visualize_2d_matrix_structure(N=5):
+    """
+    可视化 2D 热方程的系数矩阵结构
+    
+    注意：这里用小 N 便于观察，实际应用中 N 通常 >> 100
+    """
+    n_interior = (N - 1) ** 2
+    
+    # 构建矩阵（稀疏形式）
+    from scipy.sparse import diags
+    
+    # 主对角线
+    main_diag = -4 * np.ones(n_interior)
+    
+    # 上下对角线（x 方向）
+    off_diag_1 = np.ones(n_interior - 1)
+    # 每行边界处需要断开
+    for i in range(1, N-1):
+        off_diag_1[(N-1)*i - 1] = 0
+    
+    # 远对角线（y 方向）
+    off_diag_N = np.ones(n_interior - (N-1))
+    
+    # 构建矩阵
+    A = diags([off_diag_N, off_diag_1, main_diag, off_diag_1, off_diag_N],
+              [-(N-1), -1, 0, 1, N-1],
+              shape=(n_interior, n_interior)).toarray()
+    
+    # 可视化
+    plt.figure(figsize=(5, 5))
+    plt.spy(A, markersize=3)
+    plt.title(f'2D 拉普拉斯矩阵结构 (N={N}, 矩阵大小 {n_interior}×{n_interior})')
+    plt.xlabel('列')
+    plt.ylabel('行')
+    plt.tight_layout()
+    plt.show()
+    
+    print(f"矩阵大小：{n_interior} × {n_interior}")
+    print(f"非零元素：{np.count_nonzero(A)} / {n_interior**2} = {np.count_nonzero(A)/n_interior**2:.2%}")
+    print(f"(五对角带状结构，高度稀疏)")
+
+visualize_2d_matrix_structure(N=10)
+```
+
+## 2D 显式方法：五点格式
+
+### 空间离散
+
+均匀网格：
+
+$$
+x_i = i\Delta x, \quad y_j = j\Delta y, \quad i,j = 0, \ldots, N
+$$
+
+记 $u_{i,j}(t) \approx u(x_i, y_j, t)$。
+
+### 五点格式
+
+用中心差分近似：
+
+$$
+\frac{\partial^2 u}{\partial x^2}\bigg|_{(i,j)} \approx \frac{u_{i+1,j} - 2u_{i,j} + u_{i-1,j}}{\Delta x^2}
+$$
+
+$$
+\frac{\partial^2 u}{\partial y^2}\bigg|_{(i,j)} \approx \frac{u_{i,j+1} - 2u_{i,j} + u_{i,j-1}}{\Delta y^2}
+$$
+
+代入 PDE，得：
+
+$$
+\frac{du_{i,j}}{dt} = \alpha \left( \frac{u_{i+1,j} + u_{i-1,j} - 2u_{i,j}}{\Delta x^2} + \frac{u_{i,j+1} + u_{i,j-1} - 2u_{i,j}}{\Delta y^2} \right)
+$$
+
+### 显式时间步进
+
+$$
+u_{i,j}^{n+1} = u_{i,j}^n + \Delta t \cdot \alpha \left( \frac{\Delta_x u_{i,j}^n}{\Delta x^2} + \frac{\Delta_y u_{i,j}^n}{\Delta y^2} \right)
+$$
+
+其中：
+
+$$
+\Delta_x u_{i,j} := u_{i+1,j} + u_{i-1,j} - 2u_{i,j}
+$$
+
+$$
+\Delta_y u_{i,j} := u_{i,j+1} + u_{i,j-1} - 2u_{i,j}
+$$
+
+记 $r_x = \frac{\alpha\Delta t}{\Delta x^2}$, $r_y = \frac{\alpha\Delta t}{\Delta y^2}$，则：
+
+$$
+\boxed{u_{i,j}^{n+1} = u_{i,j}^n + r_x \Delta_x u_{i,j}^n + r_y \Delta_y u_{i,j}^n}
+$$
+
+### 稳定性条件
+
+Von Neumann 分析（类似 1D）给出：
+
+$$
+\boxed{r_x + r_y \leq \frac{1}{2}}
+$$
+
+特别地，若 $\Delta x = \Delta y$，则：
+
+$$
+r := \frac{\alpha\Delta t}{\Delta x^2} \leq \frac{1}{4}
+$$
+
+**对比 1D**：条件更严格了（$1/4$ vs $1/2$）！
+
+### 代码实现
+
+```{python}
+def heat2d_explicit(u0, alpha=1.0, nx=80, ny=80, T=0.02, dt=None, blow=False):
+    """
+    2D 热方程显式求解器（五点格式）
+    
+    参数：
+        u0: 初值函数或数组 (ny+1, nx+1)
+        alpha: 热扩散系数
+        nx, ny: x, y 方向网格数
+        T: 终止时间
+        dt: 时间步长（None 则自动选择）
+        blow: 是否故意超过 CFL
+    
+    返回：
+        x, y: 网格坐标
+        ts: 时间点列表
+        U: 温度历史 (len(ts), ny+1, nx+1)
+        dt: 实际时间步长
+        dt_cfl: CFL 阈值
+    """
+    # 构建网格
+    x = np.linspace(0, 1, nx + 1)
+    y = np.linspace(0, 1, ny + 1)
+    dx = x[1] - x[0]
+    dy = y[1] - y[0]
+    
+    # 初始化温度分布
+    if callable(u0):
+        X, Y = np.meshgrid(x, y, indexing='xy')
+        u = u0(X, Y).astype(float)
+    else:
+        u = np.array(u0, dtype=float)
+    
+    # 边界条件：四周为 0
+    u[[0, -1], :] = 0.0
+    u[:, [0, -1]] = 0.0
+    
+    # CFL 条件
+    dt_cfl = 0.5 / (alpha * (1/dx**2 + 1/dy**2))
+    
+    if dt is None:
+        if blow:
+            dt = 1.1 * dt_cfl
+        else:
+            dt = 0.9 * dt_cfl
+    
+    rx = alpha * dt / dx**2
+    ry = alpha * dt / dy**2
+    r_total = rx + ry
+    
+    print(f"2D 网格：{nx}×{ny}, Δx={dx:.4f}, Δy={dy:.4f}")
+    print(f"时间步长：Δt={dt:.2e}, rx={rx:.4f}, ry={ry:.4f}, rx+ry={r_total:.4f}")
+    print(f"CFL 条件：rx+ry ≤ 0.5 → Δt ≤ {dt_cfl:.2e}")
+    
+    if r_total > 0.5:
+        print(f"警告：rx+ry={r_total:.4f} > 0.5，可能不稳定！")
+    else:
+        print(f"稳定：rx+ry={r_total:.4f} ≤ 0.5")
+    
+    # 存储历史
+    snapshots = [u.copy()]
+    times = [0.0]
+    
+    t = 0.0
+    n_steps = 0
+    
+    while t < T - 1e-12:
+        u_old = u.copy()
+        
+        # 五点格式更新（向量化）
+        u[1:-1, 1:-1] = (
+            u_old[1:-1, 1:-1]
+            + rx * (u_old[2:, 1:-1] + u_old[:-2, 1:-1] - 2*u_old[1:-1, 1:-1])
+            + ry * (u_old[1:-1, 2:] + u_old[1:-1, :-2] - 2*u_old[1:-1, 1:-1])
+        )
+        
+        # 边界条件
+        u[[0, -1], :] = 0.0
+        u[:, [0, -1]] = 0.0
+        
+        t += dt
+        n_steps += 1
+        
+        snapshots.append(u.copy())
+        times.append(t)
+        
+        # 稳定性检查
+        if not np.isfinite(u).all():
+            print(f"第 {n_steps} 步出现 NaN/Inf！")
+            break
+        
+        if np.max(np.abs(u)) > 1e6:
+            print(f"第 {n_steps} 步数值爆炸（max|u|={np.max(np.abs(u)):.2e}）！")
+            break
+    
+    print(f"完成 {n_steps} 步")
+    
+    return x, y, np.array(times), np.array(snapshots), dt, dt_cfl
+```
+
+### 可视化：热斑扩散
+
+```{python}
+# 定义高斯热斑初值
+u0_2d = lambda X, Y: np.exp(-200 * ((X - 0.5) ** 2 + (Y - 0.5) ** 2))
+
+# 稳定步长测试
+x, y, ts_stable, U_stable, dt_stable, cfl_2d = heat2d_explicit(
+    u0_2d, alpha=1.0, nx=80, ny=80, T=0.02, blow=False
+)
+
+# 超步长测试
+_, _, ts_unstable, U_unstable, dt_unstable, _ = heat2d_explicit(
+    u0_2d, alpha=1.0, nx=80, ny=80, T=0.02, blow=True
+)
+
+# 可视化对比
+fig, axes = plt.subplots(2, 3, figsize=(8, 5))
+
+# 稳定情况的三个时刻
+for i, idx in enumerate([0, len(U_stable) // 2, -1]):
+    ax = axes[0, i]
+    im = ax.imshow(
+        U_stable[idx], extent=[0, 1, 0, 1], origin="lower", cmap="hot", vmin=0, vmax=1
+    )
+    ax.set_title(f"稳定步长，t={ts_stable[idx]:.4f}")
+    ax.set_xlabel("x")
+    ax.set_ylabel("y")
+    plt.colorbar(im, ax=ax, label="Temperature")
+
+# 不稳定情况
+for i, idx in enumerate([0, min(5, len(U_unstable) - 1), -1]):
+    if idx >= len(U_unstable):
+        idx = -1
+    ax = axes[1, i]
+    im = ax.imshow(U_unstable[idx], extent=[0, 1, 0, 1], origin="lower", cmap="hot")
+    if idx == 0:
+        ax.set_title(f"超步长，t={ts_unstable[idx]:.4f}")
+    else:
+        ax.set_title("几步之后（炸裂）")
+    ax.set_xlabel("x")
+    ax.set_ylabel("y")
+    plt.colorbar(im, ax=ax, label="Temperature")
+
+plt.tight_layout()
+plt.show()
+```
+
+### 动画
+
+```{python}
+from matplotlib.animation import FuncAnimation
+from IPython.display import HTML
+
+
+def create_heat_animation(x, y, ts, U, filename="heat2d.gif"):
+    """
+    创建 2D 热传导动画
+    """
+    fig, ax = plt.subplots(figsize=(6, 5))
+
+    im = ax.imshow(
+        U[0],
+        extent=[0, 1, 0, 1],
+        origin="lower",
+        cmap="hot",
+        vmin=0,
+        vmax=np.max(U[0]),
+        animated=True,
+    )
+
+    cbar = plt.colorbar(im, ax=ax, label="Temperature")
+    ax.set_xlabel("x")
+    ax.set_ylabel("y")
+    title = ax.set_title(f"t = {ts[0]:.4f}")
+
+    def update(frame):
+        im.set_data(U[frame])
+        title.set_text(f"t = {ts[frame]:.4f}")
+        return [im, title]
+
+    # 只取部分帧（避免动画太大）
+    frames = np.linspace(0, len(U) - 1, min(100, len(U)), dtype=int)
+
+    ani = FuncAnimation(fig, update, frames=frames, interval=50, blit=True)
+
+    # 保存或显示
+    # ani.save(filename, writer='pillow', fps=20)
+
+    plt.close()  # 避免重复显示
+    return ani
+
+
+# 创建动画
+ani = create_heat_animation(x, y, ts_stable, U_stable)
+
+# 在 Jupyter 中显示
+# HTML(ani.to_jshtml())
+
+# 或保存为 GIF
+ani.save("heat2d_diffusion.gif", writer="pillow", fps=20)
+```
+
+## 2D 隐式方法：迭代求解器
+
+### 问题规模
+
+对于 $N \times N$ 网格的 2D 问题，隐式方法需要解：
+
+$$
+(I - r_x L_x - r_y L_y) \mathbf{u}^{n+1} = \mathbf{u}^n
+$$
+
+其中 $\mathbf{u}$ 是长度为 $(N-1)^2$ 的向量（将 2D 数组展平）。
+
+**关键问题**：矩阵大小为 $(N-1)^2 \times (N-1)^2$，直接求解（如 `np.linalg.solve`）的复杂度是 $O(N^6)$，不可接受！
+
+### 矩阵-向量乘法
+
+**核心思想**：不显式存储矩阵，只实现矩阵-向量乘法（Matrix-Free 方法） $A\mathbf{v}$。
+
+```{python}
+def laplace2d_matvec(u, rx, ry):
+    """
+    计算 (I - rx*Lx - ry*Ly) @ u
+    
+    其中 u 是 (ny+1, nx+1) 的 2D 数组
+    
+    实现矩阵-向量乘法，但不需要显式构建矩阵
+    """
+    v = u.copy()
+    
+    # 内部点：五点格式
+    v[1:-1, 1:-1] = (
+        u[1:-1, 1:-1]
+        - rx * (u[2:, 1:-1] + u[:-2, 1:-1] - 2*u[1:-1, 1:-1])
+        - ry * (u[1:-1, 2:] + u[1:-1, :-2] - 2*u[1:-1, 1:-1])
+    )
+    
+    # 边界：保持为 0
+    v[[0, -1], :] = 0.0
+    v[:, [0, -1]] = 0.0
+    
+    return v
+```
+
+### 共轭梯度法
+
+对于对称正定（SPD）线性系统 $A\mathbf{x} = \mathbf{b}$，共轭梯度法（CG）是最优的 Krylov 子空间方法。
+
+简化版算法：
+
+```
+输入：A（通过 matvec 函数）, b, 初值 x0, 容差 tol
+输出：近似解 x
+
+1. r = b - A*x0
+2. p = r
+3. rs_old = r·r
+4. for k = 1 to max_iter:
+   4.1 Ap = A*p
+   4.2 alpha = rs_old / (p·Ap)
+   4.3 x = x + alpha * p
+   4.4 r = r - alpha * Ap
+   4.5 if ||r|| < tol: break
+   4.6 rs_new = r·r
+   4.7 beta = rs_new / rs_old
+   4.8 p = r + beta * p
+   4.9 rs_old = rs_new
+5. return x
+```
+
+**代码实现**：
+
+```{python}
+def cg_solve(b, x0, rx, ry, tol=1e-8, maxiter=1000, verbose=False):
+    """
+    共轭梯度法求解 (I - rx*Lx - ry*Ly) x = b
+    
+    参数：
+        b: 右侧向量（2D 数组）
+        x0: 初值（2D 数组）
+        rx, ry: 无量纲参数
+        tol: 收敛容差
+        maxiter: 最大迭代次数
+        verbose: 是否打印迭代信息
+    
+    返回：
+        x: 解（2D 数组）
+        n_iter: 实际迭代次数
+    """
+    x = x0.copy()
+    
+    # 初始残差
+    r = b - laplace2d_matvec(x, rx, ry)
+    p = r.copy()
+    
+    rs_old = np.sum(r * r)
+    
+    for k in range(maxiter):
+        # 矩阵-向量乘法
+        Ap = laplace2d_matvec(p, rx, ry)
+        
+        # 步长
+        pAp = np.sum(p * Ap)
+        if abs(pAp) < 1e-14:
+            if verbose:
+                print(f"p·Ap ≈ 0，停止")
+            break
+        
+        alpha = rs_old / pAp
+        
+        # 更新解和残差
+        x += alpha * p
+        r -= alpha * Ap
+        
+        # 检查收敛
+        rs_new = np.sum(r * r)
+        
+        if verbose and k % 10 == 0:
+            print(f"  iter {k:4d}: ||r|| = {np.sqrt(rs_new):.2e}")
+        
+        if np.sqrt(rs_new) < tol:
+            if verbose:
+                print(f"CG 收敛于第 {k+1} 步，||r|| = {np.sqrt(rs_new):.2e}")
+            return x, k + 1
+        
+        # 更新搜索方向
+        beta = rs_new / rs_old
+        p = r + beta * p
+        
+        rs_old = rs_new
+    
+    if verbose:
+        print(f"达到最大迭代次数 {maxiter}，||r|| = {np.sqrt(rs_old):.2e}")
+    
+    return x, maxiter
+```
+
+### 预条件共轭梯度法（PCG）
+
+**动机**：CG 的收敛速度依赖于矩阵的条件数 $\kappa(A)$。对于 2D 拉普拉斯算子，$\kappa(A) \sim O(N^2)$，导致收敛缓慢。
+
+**预条件**：用易于求逆的矩阵 $M \approx A$，求解：
+
+$$
+M^{-1} A \mathbf{x} = M^{-1} \mathbf{b}
+$$
+
+**Jacobi 预条件**：$M = \text{diag}(A)$（对角元素）
+
+对于 2D 拉普拉斯，内部点的对角元素为 $1 + 2(r_x + r_y)$。
+
+```{python}
+def pcg_solve(b, x0, rx, ry, tol=1e-8, maxiter=1000, verbose=False):
+    """
+    预条件共轭梯度法（Jacobi 预条件）
+    """
+    x = x0.copy()
+    
+    # Jacobi 预条件矩阵（对角线的逆）
+    M_inv = np.ones_like(x)
+    M_inv[1:-1, 1:-1] = 1.0 / (1 + 2*(rx + ry))
+    
+    if verbose:
+        diag_val = 1 + 2*(rx + ry)
+        print(f"  预条件：对角元={diag_val:.2f}, 1/对角元={1/diag_val:.4f}")
+    
+    # 初始残差
+    r = b - laplace2d_matvec(x, rx, ry)
+    z = M_inv * r  # 应用预条件
+    p = z.copy()
+    
+    rz_old = np.sum(r * z)
+    
+    for k in range(maxiter):
+        Ap = laplace2d_matvec(p, rx, ry)
+        
+        pAp = np.sum(p * Ap)
+        
+        # 检查为什么 pAp 可能变小
+        if abs(pAp) < 1e-14:
+            if verbose:
+                print(f"  iter {k}: pAp={pAp:.2e} 接近0，提前退出")
+            break
+        
+        alpha = rz_old / pAp
+        
+        x += alpha * p
+        r -= alpha * Ap
+        
+        residual_norm = np.linalg.norm(r)
+        
+        if verbose and k % 10 == 0:
+            print(f"  iter {k:4d}: ||r|| = {residual_norm:.2e}")
+        
+        if residual_norm < tol:
+            if verbose:
+                print(f"PCG 收敛于第 {k+1} 步，||r|| = {residual_norm:.2e}")
+            return x, k + 1
+        
+        z = M_inv * r  # 应用预条件
+        rz_new = np.sum(r * z)
+        
+        beta = rz_new / rz_old
+        p = z + beta * p
+        
+        rz_old = rz_new
+    
+    if verbose:
+        print(f"达到最大迭代次数 {maxiter}，最终 ||r|| = {np.linalg.norm(r):.2e}")
+    
+    return x, maxiter
+```
+
+### 预条件效果对比
+
+```{python}
+def compare_cg_pcg():
+    """
+    对比 CG 和 PCG 的迭代次数
+    """
+    # 设置问题
+    nx = ny = 80
+    x = np.linspace(0, 1, nx + 1)
+    y = np.linspace(0, 1, ny + 1)
+    dx = x[1] - x[0]
+    dy = y[1] - y[0]
+
+    alpha = 1.0
+    dt = 5e-3  # 大步长（隐式方法允许）
+
+    rx = alpha * dt / dx**2
+    ry = alpha * dt / dy**2
+
+    print("问题参数：")
+    print(f"   网格：{nx}×{ny}, dx=dy={dx:.4f}")
+    print(f"   时间步长：dt={dt:.2e}")
+    print(f"   无量纲参数：rx=ry={rx:.2f}")
+    print(f"   矩阵对角元：1 + 2(rx+ry) = {1 + 2 * (rx + ry):.2f}")
+    print()
+
+    # 初值
+    X, Y = np.meshgrid(x, y, indexing="xy")
+    u0 = np.exp(-200 * ((X - 0.5) ** 2 + (Y - 0.5) ** 2))
+    u0[[0, -1], :] = 0.0
+    u0[:, [0, -1]] = 0.0
+
+    # 右侧向量（BE 单步）
+    rhs = u0.copy()
+
+    # 初值（零初值）
+    x_init = np.zeros_like(u0)
+
+    print("=" * 60)
+    print("CG vs PCG 迭代次数对比（2D 后向 Euler 单步）")
+    print("=" * 60)
+
+    # 无预条件 CG
+    print("\n【无预条件 CG】")
+    u_cg, iter_cg = cg_solve(rhs, x_init, rx, ry, verbose=True)
+
+    # Jacobi 预条件 PCG
+    print("\n【Jacobi 预条件 PCG】")
+    u_pcg, iter_pcg = pcg_solve(rhs, x_init, rx, ry, verbose=True)
+
+    print("\n" + "=" * 60)
+    print(f"CG 迭代次数：{iter_cg}")
+    print(f"PCG 迭代次数：{iter_pcg}")
+
+    if iter_pcg < iter_cg:
+        print(f"加速比：{iter_cg / iter_pcg:.2f}x")
+    else:
+        print(f"PCG 反而更慢或未收敛")
+
+    print("=" * 60)
+
+    # 验证两者结果一致
+    diff = np.max(np.abs(u_cg - u_pcg))
+    print(f"两种方法的解的差异：{diff:.2e}")
+
+    # 诊断信息
+    print("\n诊断：")
+    if iter_pcg >= 1000:
+        print("   PCG 未收敛，可能原因：")
+        print("   1. 预条件不够强（对于大 rx, ry）")
+        print("   2. pAp 变得过小导致数值问题")
+        print("   3. 需要更强的预条件（如 SSOR, ILU）")
+
+
+compare_cg_pcg()
+```
+
+**说明**：对于大参数 $r_x$, $r_y$ (如>10)，Jacobi 预条件效果有限。推荐使用更小的时间步长（`dt < dx²`），或使用更强的预条件方法（SSOR, ILU, Multigrid）。本示例仅用于演示预条件的概念
+
+
+### 完整的 2D 隐式求解器
+
+```{python}
+def heat2d_implicit_be_cg(u0, alpha=1.0, nx=80, ny=80, T=0.02, dt=5e-3,
+                          use_precond=True):
+    """
+    2D 热方程后向 Euler 隐式求解器（CG 或 PCG）
+    
+    参数：
+        use_precond: 是否使用 Jacobi 预条件
+    """
+    x = np.linspace(0, 1, nx + 1)
+    y = np.linspace(0, 1, ny + 1)
+    dx = x[1] - x[0]
+    dy = y[1] - y[0]
+    
+    if callable(u0):
+        X, Y = np.meshgrid(x, y, indexing='xy')
+        u = u0(X, Y).astype(float)
+    else:
+        u = np.array(u0, dtype=float)
+    
+    u[[0, -1], :] = 0.0
+    u[:, [0, -1]] = 0.0
+    
+    rx = alpha * dt / dx**2
+    ry = alpha * dt / dy**2
+    
+    solver_name = "PCG" if use_precond else "CG"
+    print(f"2D BE 求解器（{solver_name}）：{nx}×{ny} 网格，Δt={dt:.2e}")
+    
+    snapshots = [u.copy()]
+    times = [0.0]
+    total_iters = 0
+    
+    t = 0.0
+    n_steps = int(T / dt)
+    
+    for step in range(n_steps):
+        rhs = u.copy()
+        
+        # 解线性系统
+        if use_precond:
+            u, iters = pcg_solve(rhs, u, rx, ry, tol=1e-8, verbose=False)
+        else:
+            u, iters = cg_solve(rhs, u, rx, ry, tol=1e-8, verbose=False)
+        
+        total_iters += iters
+        
+        t += dt
+        snapshots.append(u.copy())
+        times.append(t)
+    
+    avg_iters = total_iters / n_steps
+    print(f"完成 {n_steps} 步，平均每步 {solver_name} 迭代 {avg_iters:.1f} 次")
+    
+    return x, y, np.array(times), np.array(snapshots)
+```
+
+## JAX 高级特性：scan 优化
+
+### 问题：Python 循环的低效
+
+```python
+# NumPy 版本的时间循环
+for _ in range(n_steps):
+    u = step_function(u)
+```
+
+在 JAX 中，每次循环都会触发一次编译，效率低。
+
+### jax.lax.scan 的优势
+
+`scan` 是一个可以被 JIT 编译的循环结构。
+
+```{python}
+if JAX_AVAILABLE:
+    from functools import partial
+    from jax import lax
+
+    @partial(jit, static_argnums=(2,))
+    def heat2d_explicit_jax_scan(u0, params, n_steps):
+        """
+        使用 scan 优化的 2D 热方程求解器
+
+        这个函数整体被 JIT 编译，比 Python 循环快得多
+        """
+        rx, ry = params
+
+        # 定义单步函数（可以访问外部的 rx, ry）
+        def step_fn(u, _):
+            # 五点格式更新
+            u_new = u.at[1:-1, 1:-1].set(
+                u[1:-1, 1:-1]
+                + rx * (u[2:, 1:-1] + u[:-2, 1:-1] - 2 * u[1:-1, 1:-1])
+                + ry * (u[1:-1, 2:] + u[1:-1, :-2] - 2 * u[1:-1, 1:-1])
+            )
+
+            # 边界
+            u_new = u_new.at[[0, -1], :].set(0.0)
+            u_new = u_new.at[:, [0, -1]].set(0.0)
+
+            return u_new, None
+
+        u_final, _ = lax.scan(step_fn, u0, xs=None, length=n_steps)
+        return u_final
+
+    def heat2d_explicit_jax(u0_func, alpha=1.0, nx=80, ny=80, T=0.02):
+        """JAX 版 2D 显式求解器（高性能）"""
+        x = jnp.linspace(0, 1, nx + 1)
+        y = jnp.linspace(0, 1, ny + 1)
+        dx = float(x[1] - x[0])
+        dy = float(y[1] - y[0])
+
+        X, Y = jnp.meshgrid(x, y, indexing="xy")
+        u0 = u0_func(X, Y)
+        u0 = u0.at[[0, -1], :].set(0.0).at[:, [0, -1]].set(0.0)
+
+        # CFL 条件
+        dt = 0.9 * 0.5 / (alpha * (1 / dx**2 + 1 / dy**2))
+        rx = alpha * dt / dx**2
+        ry = alpha * dt / dy**2
+
+        params = (rx, ry)
+        # 确保 n_steps 是 Python int
+        n_steps = int(T / dt)
+
+        print(f"JAX 2D 显式：{nx}×{ny} 网格，{n_steps} 步")
+
+        # 首次调用会编译（较慢）
+        u_final = heat2d_explicit_jax_scan(u0, params, n_steps)
+
+        return np.array(u_final)
+```
+
+### 性能对比
+
+```{python}
+if JAX_AVAILABLE:
+    import time
+    
+    # NumPy 版本的初值函数
+    u0_func_np = lambda X, Y: np.exp(-200*((X-0.5)**2 + (Y-0.5)**2))
+    
+    # JAX 版本的初值函数（使用 jnp）
+    u0_func_jax = lambda X, Y: jnp.exp(-200*((X-0.5)**2 + (Y-0.5)**2))
+    
+    nx = ny = 100
+    T_test = 0.01
+    
+    # NumPy 版本
+    print("【NumPy 版本】")
+    t0 = time.time()
+    _, _, _, U_numpy, _, _ = heat2d_explicit(u0_func_np, nx=nx, ny=ny, T=T_test)
+    time_numpy = time.time() - t0
+    print(f"时间：{time_numpy:.4f} 秒\n")
+    
+    # JAX 版本（预热）
+    print("【JAX 版本（预热中）】")
+    _ = heat2d_explicit_jax(u0_func_jax, nx=nx, ny=ny, T=T_test)
+    
+    print("\n【JAX 版本（预热后）】")
+    t0 = time.time()
+    u_jax = heat2d_explicit_jax(u0_func_jax, nx=nx, ny=ny, T=T_test)
+    time_jax = time.time() - t0
+    print(f"时间：{time_jax:.4f} 秒\n")
+    
+    print("=" * 50)
+    print(f"加速比：{time_numpy / time_jax:.1f}x")
+    print(f"误差：{np.max(np.abs(U_numpy[-1] - u_jax)):.2e}")
+    print("=" * 50)
+```
+
+**预期输出**：
+
+- NumPy：~1-2 秒
+- JAX（预热后）：~0.1-0.3 秒
+- 加速比：5-10x
+
+### 小结
+
+**核心概念**：
+
+1. **2D 复杂度**：未知量和矩阵大小都是 $O(N^2)$
+2. **五点格式**：2D 拉普拉斯算子的标准离散
+3. **CFL 条件**：2D 更严格（$r \leq 1/4$）
+4. **迭代求解器**：CG/PCG 是 2D 隐式方法的关键
+5. **预条件**：显著减少迭代次数
+
+**方法选择**：
+
+- **小问题**（$N < 100$）：显式方法简单高效
+- **大问题**（$N > 200$）：隐式方法 + PCG
+- **极大问题**（$N > 1000$）：多重网格等高级方法
+
+**自检问题**：
+
+1. 2D 五点格式的 CFL 条件为什么比 1D 更严格？
+2. 为什么不能对 2D 问题使用直接法求解？
+3. Jacobi 预条件的作用原理是什么？
+4. JAX 的 `scan` 相比 Python 循环有什么优势？
+
+**深入探索**（选读）：
+
+- [Saad 的《Iterative Methods》](https://www-users.cse.umn.edu/~saad/IterMethBook_2ndEd.pdf)
+- 多重网格方法（Multigrid）
+- 区域分解法（Domain Decomposition）
+
+# 四、PDE 分类与方法特色
+
+## 三大类型概览
+
+偏微分方程根据其数学性质可分为三大类型：
+
+| 类型 | 标准形式 | 典型例子 | 物理意义 | 数值特点 |
+|------|---------|---------|---------|---------|
+| **椭圆型** | $\nabla^2 u = f$ | 泊松方程、拉普拉斯方程 | 稳态场、平衡态 | 边界值问题，全局耦合 |
+| **抛物型** | $u_t = \alpha \nabla^2 u$ | 热方程、扩散方程 | 扩散过程、热传导 | 初边值问题，时间演化 |
+| **双曲型** | $u_{tt} = c^2 \nabla^2 u$ | 波动方程 | 波传播、振动 | 初边值问题，有限传播速度 |
+
+**判别方法**（2D 二阶 PDE）：
+
+对于一般二阶 PDE：
+
+$$
+A u_{xx} + 2B u_{xy} + C u_{yy} + \cdots = 0
+$$
+
+判别式 $\Delta = B^2 - AC$：
+
+- $\Delta < 0$：椭圆型
+- $\Delta = 0$：抛物型
+- $\Delta > 0$：双曲型
+
+## 椭圆型 PDE：稳态热分布
+
+### 从抛物到椭圆
+
+热方程的**稳态极限**（$\partial u / \partial t = 0$）：
+
+$$
+0 = \alpha \nabla^2 u \quad \Rightarrow \quad \nabla^2 u = 0 \quad \text{(拉普拉斯方程)}
+$$
+
+或带源项：
+
+$$
+-\nabla^2 u = f(x, y) \quad \text{(泊松方程)}
+$$
+
+**物理意义**：长时间后的温度分布（热平衡）。
+
+### 边界值问题
+
+典型设置：
+
+- 区域：$\Omega = (0,1) \times (0,1)$
+- 方程：$-\nabla^2 u = f$ in $\Omega$
+- 边界：
+  - Dirichlet：$u|_{\partial\Omega} = g$（指定温度）
+  - Neumann：$\frac{\partial u}{\partial n}\bigg|_{\partial\Omega} = h$（指定热流）
+  - Robin：$\alpha u + \beta \frac{\partial u}{\partial n} = \gamma$（混合）
+
+### 数值求解：迭代法
+
+五点格式离散：
+
+$$
+-u_{i+1,j} - u_{i-1,j} - u_{i,j+1} - u_{i,j-1} + 4u_{i,j} = \Delta x^2 f_{i,j}
+$$
+
+**Gauss-Seidel 迭代**：
+
+```{python}
+def poisson2d_gauss_seidel(
+    f, g_boundary, alpha=1.0, nx=50, ny=50, tol=1e-6, maxiter=10000
+):
+    """
+    2D 泊松方程求解器（Gauss-Seidel 迭代）
+
+    方程：-α ∇²u = f
+    边界：u|∂Ω = g
+
+    参数：
+        f: 源项函数 f(x, y)
+        g_boundary: 边界条件函数 g(x, y)
+        ...
+    """
+    x = np.linspace(0, 1, nx + 1)
+    y = np.linspace(0, 1, ny + 1)
+    dx = x[1] - x[0]
+    dy = y[1] - y[0]
+
+    # 初始化
+    X, Y = np.meshgrid(x, y, indexing="xy")
+    u = np.zeros((ny + 1, nx + 1))
+
+    # 边界条件
+    u[0, :] = g_boundary(X[0, :], Y[0, :])  # 下边界
+    u[-1, :] = g_boundary(X[-1, :], Y[-1, :])  # 上边界
+    u[:, 0] = g_boundary(X[:, 0], Y[:, 0])  # 左边界
+    u[:, -1] = g_boundary(X[:, -1], Y[:, -1])  # 右边界
+
+    # 源项
+    F = f(X, Y) * dx**2 / alpha
+
+    print(f"泊松方程 Gauss-Seidel：{nx}×{ny} 网格")
+
+    # 迭代
+    for k in range(maxiter):
+        u_old = u.copy()
+
+        # Gauss-Seidel 更新（逐点，使用最新值）
+        for i in range(1, ny):
+            for j in range(1, nx):
+                u[i, j] = 0.25 * (
+                    u[i + 1, j] + u[i - 1, j] + u[i, j + 1] + u[i, j - 1] + F[i, j]
+                )
+
+        # 检查收敛
+        diff = np.max(np.abs(u - u_old))
+
+        if k % 100 == 0:
+            print(f"  iter {k:5d}: max|Δu| = {diff:.2e}")
+
+        if diff < tol:
+            print(f"收敛于第 {k + 1} 步")
+            return x, y, u, k + 1
+
+    print(f"达到最大迭代次数")
+    return x, y, u, maxiter
+```
+
+**示例**：求解 $-\nabla^2 u = 2\pi^2 \sin(\pi x)\sin(\pi y)$，边界为 0。
+
+解析解：$u(x, y) = \sin(\pi x)\sin(\pi y)$。
+
+```{python}
+# 问题设置
+f = lambda X, Y: 2 * np.pi**2 * np.sin(np.pi * X) * np.sin(np.pi * Y)
+g = lambda X, Y: np.zeros_like(X)  # 零边界
+
+# 求解
+x, y, u_gs, iters = poisson2d_gauss_seidel(f, g, nx=50, ny=50)
+
+# 解析解
+X, Y = np.meshgrid(x, y, indexing='xy')
+u_exact = np.sin(np.pi * X) * np.sin(np.pi * Y)
+
+# 误差
+error = np.max(np.abs(u_gs - u_exact))
+print(f"\n最大误差：{error:.2e}")
+
+# 可视化
+fig, axes = plt.subplots(1, 3, figsize=(10, 3))
+
+im0 = axes[0].imshow(u_gs, extent=[0,1,0,1], origin='lower', cmap='viridis')
+axes[0].set_title('数值解（Gauss-Seidel）')
+plt.colorbar(im0, ax=axes[0])
+
+im1 = axes[1].imshow(u_exact, extent=[0,1,0,1], origin='lower', cmap='viridis')
+axes[1].set_title('解析解')
+plt.colorbar(im1, ax=axes[1])
+
+im2 = axes[2].imshow(np.abs(u_gs - u_exact), extent=[0,1,0,1], 
+                     origin='lower', cmap='hot')
+axes[2].set_title('误差分布')
+plt.colorbar(im2, ax=axes[2])
+
+plt.tight_layout()
+plt.show()
+```
+
+### 与瞬态问题的联系
+
+**观察**：运行抛物型问题足够长的时间，应该收敛到椭圆型的解。
+
+```{python}
+# 验证：抛物型 t→∞ = 椭圆型稳态（有源项版本）
+
+print("=" * 70)
+print("有源项的稳态比较")
+print("=" * 70)
+
+# 定义源项：使得稳态解为 sin(πx)sin(πy)
+# 从 -∇²u = f 推导：f = -∇²(sin(πx)sin(πy)) = 2π² sin(πx)sin(πy)
+source_term = lambda X, Y: 2 * np.pi**2 * np.sin(np.pi * X) * np.sin(np.pi * Y)
+zero_boundary = lambda X, Y: np.zeros_like(X)
+
+# 方法1：椭圆型直接求解
+print("\n【椭圆型方程求解】")
+x_ellip, y_ellip, u_ellip, _ = poisson2d_gauss_seidel(
+    source_term,  # 源项
+    zero_boundary,  # 边界=0
+    alpha=1.0,
+    nx=50,
+    ny=50,
+)
+
+# 方法2：抛物型演化到稳态
+# 这里需要一个支持源项的瞬态求解器
+# 由于原代码的 heat2d_implicit_be_cg 不支持源项，用另一个方法验证
+
+# 解析解
+X_exact, Y_exact = np.meshgrid(x_ellip, y_ellip, indexing='xy')
+u_exact = np.sin(np.pi * X_exact) * np.sin(np.pi * Y_exact)
+
+# 比较椭圆型求解与解析解
+error_ellip = np.max(np.abs(u_ellip - u_exact))
+print(f"\n椭圆型求解 vs 解析解，最大误差：{error_ellip:.2e}")
+
+# 可视化
+fig, axes = plt.subplots(1, 3, figsize=(10, 3))
+
+im0 = axes[0].imshow(u_ellip, extent=[0,1,0,1], origin='lower', cmap='viridis')
+axes[0].set_title('椭圆型数值解')
+plt.colorbar(im0, ax=axes[0])
+
+im1 = axes[1].imshow(u_exact, extent=[0,1,0,1], origin='lower', cmap='viridis')
+axes[1].set_title('解析解')
+plt.colorbar(im1, ax=axes[1])
+
+im2 = axes[2].imshow(np.abs(u_ellip - u_exact), extent=[0,1,0,1], 
+                     origin='lower', cmap='hot')
+axes[2].set_title('误差分布')
+plt.colorbar(im2, ax=axes[2])
+
+plt.tight_layout()
+plt.show()
+```
+
+
+## 双曲型 PDE：热波方程
+
+### 有限传播速度的热传导
+
+经典热方程（抛物型）有一个反直觉的性质：**热量瞬时传播到无穷远**
+
+$$
+u(x, t=0^+) > 0 \quad \Rightarrow \quad u(x', t) > 0 \quad \forall x', t > 0
+$$
+
+这在微观尺度（如超短激光脉冲）或极端条件（低温）下不准确。
+
+### Cattaneo 方程
+
+修正的热传导模型（双曲型）：
+
+$$
+\tau \frac{\partial^2 u}{\partial t^2} + \frac{\partial u}{\partial t} = \alpha \nabla^2 u
+$$
+
+其中 $\tau$ 是**松弛时间**（relaxation time）。
+
+**特性**：
+
+- $\tau = 0$：退化为经典热方程（抛物型）
+- $\tau > 0$：有限传播速度 $c = \sqrt{\alpha/\tau}$
+
+### 数值方法（简化 1D）
+
+对于 1D：
+
+$$
+\tau u_{tt} + u_t = \alpha u_{xx}
+$$
+
+用中心差分：
+
+$$
+\tau \frac{u^{n+1} - 2u^n + u^{n-1}}{\Delta t^2} + \frac{u^{n+1} - u^{n-1}}{2\Delta t} = \alpha \frac{u_{i+1}^n - 2u_i^n + u_{i-1}^n}{\Delta x^2}
+$$
+
+整理后可得显式格式（需要两个时间层）。
+
+**代码示例**（简化）：
+
+```{python}
+def cattaneo1d_explicit(u0, v0, alpha=1.0, tau=0.01, N=100, T=0.05):
+    """
+    1D Cattaneo 方程显式求解器
+
+    方程：τ u_tt + u_t = α u_xx
+
+    需要两个初值：u(x,0) 和 u_t(x,0)
+
+    参数：
+        u0: 初始位移 u(x,0)
+        v0: 初始速度 u_t(x,0)
+        alpha: 扩散系数
+        tau: 松弛时间
+        N: 空间网格数
+        T: 终止时间
+    """
+    x = np.linspace(0, 1, N + 1)
+    dx = x[1] - x[0]
+
+    # 初值
+    if callable(u0):
+        u = u0(x).astype(float)
+    else:
+        u = np.array(u0, dtype=float)
+
+    if callable(v0):
+        v = v0(x).astype(float)
+    else:
+        v = np.array(v0, dtype=float)
+
+    u[0] = u[-1] = 0.0
+    v[0] = v[-1] = 0.0
+
+    # 对于 Cattaneo 方程，稳定性条件约为：
+    # dt ≤ C * min(dx/sqrt(α/τ), sqrt(τ))
+    c_wave = np.sqrt(alpha / tau)  # 波速
+    dt_cfl = 0.5 * dx / c_wave  # CFL 条件
+    dt_damping = 0.5 * tau  # 阻尼相关
+    dt = min(dt_cfl, dt_damping)
+
+    print(f"Cattaneo 参数：α={alpha}, τ={tau}, N={N}")
+    print(f"波速 c={c_wave:.3f}, Δx={dx:.4f}, Δt={dt:.2e}")
+    print(f"CFL数：c*Δt/Δx = {c_wave * dt / dx:.3f} (应 < 1)")
+
+    # 无量纲参数
+    r = alpha * dt**2 / dx**2
+    gamma = dt / (2 * tau)
+
+    # 第一步：用 Taylor 展开更精确地计算 u^1
+    # u^1 ≈ u^0 + dt*v^0 + (dt²/2)*a^0
+    # 其中 a^0 = (α u_xx^0 - v^0) / τ
+    u_old = u.copy()
+
+    # 计算初始加速度
+    acc = np.zeros_like(u)
+    acc[1:-1] = (alpha * (u[:-2] - 2 * u[1:-1] + u[2:]) / dx**2 - v[1:-1]) / tau
+
+    # 第一步
+    u_new = u.copy()
+    u_new[1:-1] = u[1:-1] + dt * v[1:-1] + 0.5 * dt**2 * acc[1:-1]
+    u_new[0] = u_new[-1] = 0.0
+
+    snapshots = [u_old.copy(), u_new.copy()]
+    times = [0.0, dt]
+
+    # 时间步进（三层格式）
+    t = dt
+    n_step = 0
+    max_val = np.max(np.abs(u))
+
+    while t < T - 1e-12:
+        u_next = np.zeros_like(u)
+
+        # 系数（基于中心差分的三层格式）
+        # τ(u^{n+1} - 2u^n + u^{n-1})/dt² + (u^{n+1} - u^{n-1})/(2dt) = α u_xx^n
+
+        # 左侧系数
+        coef_next = tau / dt**2 + 1.0 / (2.0 * dt)
+        coef_curr = -2.0 * tau / dt**2
+        coef_old = tau / dt**2 - 1.0 / (2.0 * dt)
+
+        # 右侧（空间项）
+        laplacian = (u_new[:-2] - 2 * u_new[1:-1] + u_new[2:]) / dx**2
+
+        # 更新
+        u_next[1:-1] = (
+            alpha * laplacian - coef_curr * u_new[1:-1] - coef_old * u_old[1:-1]
+        ) / coef_next
+
+        u_next[0] = u_next[-1] = 0.0
+
+        # 更新变量
+        u_old = u_new.copy()
+        u_new = u_next.copy()
+
+        t += dt
+        n_step += 1
+        snapshots.append(u_new.copy())
+        times.append(t)
+
+        # 稳定性监控
+        current_max = np.max(np.abs(u_new))
+        if not np.isfinite(u_new).all():
+            print(f"第 {n_step} 步出现 NaN/Inf！")
+            break
+
+        if current_max > 10 * max_val:
+            print(f"第 {n_step} 步数值增长过快！max|u|={current_max:.2e}")
+            break
+
+        if n_step % 50 == 0:
+            print(f"  步 {n_step}: t={t:.4f}, max|u|={current_max:.2e}")
+
+    print(f"完成 {n_step} 步")
+
+    return x, np.array(times), np.array(snapshots)
+
+
+# ========== 测试 ==========
+print("=" * 70)
+print("Cattaneo 方程数值求解")
+print("=" * 70)
+
+# 初值：高斯脉冲
+u0 = lambda x: np.exp(-200 * (x - 0.5) ** 2)
+v0 = lambda x: np.zeros_like(x)  # 初始速度=0
+
+# 参数选择建议：
+# - tau 较小（如 0.001）：更接近经典热方程
+# - tau 较大（如 0.1）：波动特性更明显
+x_cat, ts_cat, U_cat = cattaneo1d_explicit(
+    u0,
+    v0,
+    alpha=1.0,
+    tau=0.005,  # 较小的 τ，更稳定
+    N=100,  # 适中的网格
+    T=0.05,
+)
+
+# 可视化
+plt.figure(figsize=(9, 4))
+
+# 子图1：不同时刻的分布
+plt.subplot(1, 2, 1)
+indices = [0, len(U_cat) // 4, len(U_cat) // 2, 3 * len(U_cat) // 4, -1]
+for idx in indices:
+    if idx < len(U_cat):
+        plt.plot(x_cat, U_cat[idx], label=f"t={ts_cat[idx]:.4f}")
+plt.xlabel("x")
+plt.ylabel("u(x, t)")
+plt.title("Cattaneo 方程：温度分布演化")
+plt.legend()
+plt.grid(alpha=0.3)
+
+# 子图2：时空图
+plt.subplot(1, 2, 2)
+plt.imshow(
+    U_cat.T,
+    aspect="auto",
+    origin="lower",
+    extent=[ts_cat[0], ts_cat[-1], 0, 1],
+    cmap="hot",
+)
+plt.colorbar(label="u(x, t)")
+plt.xlabel("时间 t")
+plt.ylabel("空间 x")
+plt.title("时空演化图")
+
+plt.tight_layout()
+plt.show()
+```
+
+::: callout-note
+双曲型 PDE 的数值方法更复杂，这里仅作概念演示。实际应用需要更精细的格式和稳定性分析。
+:::
+
+### 小结
+
+**PDE 分类**：
+
+| 类型 | 时间依赖 | 边界条件 | 数值特点 | 典型方法 |
+|------|---------|---------|---------|---------|
+| 椭圆型 | 无 | 边界值问题 | 全局耦合 | 迭代法（Gauss-Seidel, CG） |
+| 抛物型 | 有（一阶导） | 初边值问题 | 扩散型 | 时间步进（显式/隐式） |
+| 双曲型 | 有（二阶导） | 初边值问题 | 波动型 | 特征线法、Lax-Wendroff 等 |
+
+**自检问题**：
+
+1. 如何从数学上区分三种类型的 PDE？
+2. 为什么椭圆型问题通常用迭代法而非直接法？
+
+**深入探索**：
+
+- [Evans 的《PDE》教材](https://bookstore.ams.org/gsm-19-r)
+- [有限元方法](https://en.wikipedia.org/wiki/Finite_element_method)（处理复杂几何）
+- [谱方法](https://en.wikipedia.org/wiki/Spectral_method)（高精度）
+
+
+# 五、高级话题与展望
+
+## 无网格方法简介
+
+### 有限差分的局限
+
+**问题**：
+
+- 规则网格：难以处理复杂几何（如心脏、飞机机翼）
+- 边界近似：阶梯状边界导致精度损失
+- 网格生成：对于 3D 复杂形状，网格生成本身就是难题
+
+### 径向基函数方法
+
+用一组基函数的线性组合近似解：
+
+$$
+u(x, y) \approx \sum_{i=1}^N c_i \phi(\| (x,y) - (x_i, y_i) \|)
+$$
+
+其中 $\phi(r)$ 是**径向基函数**（RBF），例如：
+
+- 高斯：$\phi(r) = e^{-(\epsilon r)^2}$
+- 多二次：$\phi(r) = \sqrt{1 + (\epsilon r)^2}$
+- 逆多二次：$\phi(r) = 1/\sqrt{1 + (\epsilon r)^2}$
+
+**优势**：
+
+- 不需要结构化网格
+- 可以处理任意形状边界
+- 高精度（谱精度）
+
+**代码示例**：
+
+```{python}
+def rbf_gaussian(r, epsilon=1.0):
+    """高斯 RBF"""
+    return np.exp(-(epsilon * r)**2)
+
+def rbf_interpolation_matrix(points, epsilon=1.0):
+    """
+    构建 RBF 插值矩阵
+    
+    points: (N, 2) 数组，每行是 (x, y)
+    """
+    N = len(points)
+    A = np.zeros((N, N))
+    
+    for i in range(N):
+        for j in range(N):
+            r = np.linalg.norm(points[i] - points[j])
+            A[i, j] = rbf_gaussian(r, epsilon)
+    
+    return A
+
+# 示例：用 RBF 插值一个函数
+np.random.seed(42)
+points = np.random.rand(20, 2)  # 随机点
+f_values = np.sin(np.pi * points[:, 0]) * np.cos(np.pi * points[:, 1])
+
+A = rbf_interpolation_matrix(points, epsilon=5.0)
+coeffs = np.linalg.solve(A, f_values)
+
+# 评估插值
+x_test = np.linspace(0, 1, 50)
+y_test = np.linspace(0, 1, 50)
+X_test, Y_test = np.meshgrid(x_test, y_test)
+
+u_interp = np.zeros_like(X_test)
+for i in range(len(points)):
+    r = np.sqrt((X_test - points[i, 0])**2 + (Y_test - points[i, 1])**2)
+    u_interp += coeffs[i] * rbf_gaussian(r, epsilon=5.0)
+
+# 可视化
+fig, ax = plt.subplots(figsize=(8, 6))
+im = ax.contourf(X_test, Y_test, u_interp, levels=20, cmap='viridis')
+ax.plot(points[:, 0], points[:, 1], 'ro', markersize=5, label='配点')
+plt.colorbar(im, label='插值')
+ax.set_title('RBF 插值示例')
+ax.legend()
+plt.show()
+```
+
+**求解 PDE**（配点法）：
+
+对于 $-\nabla^2 u = f$，在配点 $(x_i, y_i)$ 上要求：
+
+$$
+-\nabla^2 \left(\sum_j c_j \phi_j\right)\bigg|_{(x_i, y_i)} = f(x_i, y_i)
+$$
+
+这需要计算 RBF 的拉普拉斯算子，可以用**自动微分**，这也是 JAX 的优势。
+
+## 反问题：参数估计与优化
+
+### 问题设定
+
+**正问题**：给定参数 $\alpha$，求解温度分布 $u(x, t)$。
+
+**反问题**：给定观测数据 $\{u(x_i, t_j)\}$，反推参数 $\alpha$。
+
+**应用**：
+
+- 材料热扩散系数测定
+- 地质勘探（从温度剖面推断地下结构）
+- 医学成像（从体表温度推断内部病变）
+
+### JAX 自动微分
+
+```{python}
+if JAX_AVAILABLE:
+    from functools import partial
+    from jax import grad, jit, lax
+    import optax
+
+    # ========== 正向求解器（可微分）==========
+    @partial(jit, static_argnums=(4,))
+    def forward_solve_1d(alpha, u0, dx, dt, n_steps):
+        """
+        1D 热方程求解器（JAX 版本，可微分）
+
+        参数：
+            alpha: 热扩散系数（待估计）
+            u0: 初值
+            dx, dt: 步长
+            n_steps: 时间步数（静态参数）
+
+        返回：
+            u_final: 最终温度分布
+        """
+        r = alpha * dt / dx**2
+
+        def step_fn(i, u):
+            return u.at[1:-1].set(u[1:-1] + r * (u[:-2] - 2 * u[1:-1] + u[2:]))
+
+        u_final = lax.fori_loop(0, n_steps, step_fn, u0)
+        return u_final
+
+    # ========== 损失函数 ==========
+    def loss_function(alpha, observations, obs_indices):
+        """
+        损失函数：预测值与观测值的均方误差
+        """
+        # 正向求解
+        N = 100
+        u0 = jnp.sin(jnp.pi * jnp.linspace(0, 1, N + 1))
+        dx = 1.0 / N
+
+        # 确保满足CFL条件
+        # r = alpha * dt / dx^2 ≤ 0.5
+        # 对于 alpha 在 [0.1, 2.0] 范围内，保守估计 alpha_max = 2.0
+        alpha_max = 2.0
+        dt = 0.4 * dx**2 / alpha_max  # 确保对所有可能的 alpha 都稳定
+        n_steps = 1000  # 增加步数以达到相同的总时间
+
+        u_pred = forward_solve_1d(alpha, u0, dx, dt, n_steps)
+
+        # 提取观测点的预测值
+        u_obs_pred = u_pred[obs_indices]
+
+        # 均方误差
+        return jnp.mean((u_obs_pred - observations) ** 2)
+
+    # ========== 优化 ==========
+    def estimate_alpha():
+        """
+        从观测数据估计热扩散系数
+        """
+        # 生成"真实"观测数据（假设真实 alpha=1.0）
+        true_alpha = 1.0
+        N = 100
+        u0_true = jnp.sin(jnp.pi * jnp.linspace(0, 1, N + 1))
+        dx = 1.0 / N
+
+        # 使用稳定的时间步长
+        alpha_max = 2.0
+        dt = 0.4 * dx**2 / alpha_max
+        n_steps = 1000
+
+        print(f"数值参数：")
+        print(f"   N = {N}, dx = {dx:.4f}")
+        print(f"   dt = {dt:.2e}, n_steps = {n_steps}")
+        print(f"   总时间 T = {dt * n_steps:.4f}")
+        print(f"   对于 α={true_alpha}，r = {true_alpha * dt / dx**2:.3f} ≤ 0.5")
+        print()
+
+        u_true = forward_solve_1d(true_alpha, u0_true, dx, dt, n_steps)
+
+        # 选择部分点作为"观测"
+        obs_indices = jnp.array([25, 50, 75])  # x=0.25, 0.5, 0.75
+        observations = u_true[obs_indices]
+
+        # 添加噪声（模拟测量误差）
+        key = jax.random.PRNGKey(42)
+        noise = 0.01 * jax.random.normal(key, observations.shape)
+        observations_noisy = observations + noise
+
+        print("=" * 60)
+        print("反问题：从观测数据估计热扩散系数")
+        print("=" * 60)
+        print(f"真实参数：α = {true_alpha:.4f}")
+        print(f"观测点：x = {obs_indices / N}")
+        print(f"观测值（含噪声）：{observations_noisy}")
+        print(f"观测值范围检查：max={jnp.max(jnp.abs(observations_noisy)):.2e}")
+
+        # 初始猜测
+        alpha_init = 0.5
+
+        # 使用 Adam 优化器
+        optimizer = optax.adam(learning_rate=0.01)
+        opt_state = optimizer.init(alpha_init)
+
+        alpha = alpha_init
+
+        print(f"\n初始猜测：α = {alpha:.4f}")
+        print("\n开始优化...")
+
+        for i in range(200):
+            # 计算损失和梯度
+            loss_val, grads = jax.value_and_grad(loss_function)(
+                alpha, observations_noisy, obs_indices
+            )
+
+            # 更新参数
+            updates, opt_state = optimizer.update(grads, opt_state)
+            alpha = optax.apply_updates(alpha, updates)
+
+            if i % 20 == 0:
+                print(f"  iter {i:3d}: α = {alpha:.4f}, loss = {loss_val:.2e}")
+
+        print("\n" + "=" * 60)
+        print(f"最终估计：α = {alpha:.4f}")
+        print(f"真实值：  α = {true_alpha:.4f}")
+        print(f"相对误差：{abs(alpha - true_alpha) / true_alpha * 100:.2f}%")
+        print("=" * 60)
+
+        return alpha
+
+    # 运行估计
+    estimated_alpha = estimate_alpha()
+```
+
+## 科学机器学习（SciML）简介
+
+### 物理信息神经网络（PINNs）
+
+**核心思想**：用神经网络 $u_\theta(x, t)$ 近似 PDE 的解，通过最小化**物理残差**训练：
+
+$$
+\mathcal{L} = \left\| \frac{\partial u_\theta}{\partial t} - \alpha \frac{\partial^2 u_\theta}{\partial x^2} \right\|^2 + \text{边界/初值损失}
+$$
+
+**JAX 的优势**：自动微分可以轻松计算 $\partial u / \partial x$、$\partial^2 u / \partial x^2$ 等。
+
+### 神经算子（Neural Operators）
+
+**问题**：传统神经网络输入固定维度，难以处理不同分辨率的数据。
+
+**神经算子**：学习**算子**（函数到函数的映射）：
+
+$$
+\mathcal{G}: u_0(\cdot) \mapsto u(\cdot, T)
+$$
+
+例如：Fourier Neural Operator (FNO)。
+
+**应用**：
+
+- 快速求解 PDE（训练一次，推理时比传统求解器快 1000 倍）
+- 多尺度建模
+- 不确定性量化
+
+### 延伸阅读
+
+- [Physics-Informed Neural Networks](https://www.sciencedirect.com/science/article/pii/S0021999118307125)
+- [Fourier Neural Operator](https://arxiv.org/abs/2010.08895)
+- JAX 在 SciML 中的应用：[Equinox](https://github.com/patrick-kidger/equinox)、[Diffrax](https://github.com/patrick-kidger/diffrax)
+
+### 小结
+
+**拓展方向**：
+
+1. **无网格方法**：突破网格限制，处理复杂几何
+2. **反问题**：从数据反推参数（JAX 自动微分的天然应用）
+3. **SciML**：结合机器学习与科学计算的新范式
+
+**JAX 生态系统**：
+
+- 核心库：jax, jaxlib
+- 优化：optax
+- 神经网络：flax, equinox
+- ODE/PDE：diffrax
+
+**自学建议**：
+1. 先掌握基础方法（前 3 部分）
+2. 选择一个感兴趣的方向深入
+3. 动手实现，从简单问题开始
+4. 阅读前沿论文，跟踪最新进展
+
+
+# 总结与展望
+
+## 核心要点回顾
+
+### 第一部分：ODE → PDE
+- **半离散化**：空间离散 → ODE 系统
+- **显式方法**：简单高效，但受 CFL 限制
+- **向量化**：NumPy 加速；JAX JIT 编译
+
+### 第二部分：隐式方法
+- **BE/CN**：无条件稳定，允许大步长
+- **Thomas 算法**：$O(N)$ 求解三对角系统
+- **权衡**：步数 vs 每步成本
+
+### 第三部分：2D 问题
+- **复杂度跃升**：矩阵大小 $O(N^2) \times O(N^2)$
+- **迭代求解器**：CG/PCG 替代直接法
+- **预条件**：关键的加速技术
+- **JAX scan**：高效循环结构
+
+### 第四部分：PDE 分类
+- **椭圆型**：稳态，边界值问题
+- **抛物型**：扩散，初边值问题
+- **双曲型**：波动，有限传播速度
+
+### 第五部分：前沿话题
+- **无网格方法**：RBF、配点法
+- **反问题**：参数估计、自动微分
+- **SciML**：PINNs、Neural Operators
+
+## 学习路径建议
+
+### 初学者（本科生）
+
+1. 完成第 1-2 部分的 NumPy 实现
+2. 理解 CFL 条件和稳定性
+3. 尝试修改代码，测试不同参数
+
+### 进阶者（研究生）
+
+1. 深入第 3 部分的迭代求解器
+2. 实现 JAX 版本，对比性能
+3. 探索第 4 部分的不同 PDE 类型
+
+### 研究导向
+
+1. 第 5 部分的无网格/反问题
+2. 阅读前沿论文
+3. 开发自己的求解器库
+
+## 实践项目选题建议
+
+### 项目 1：CFL 条件可视化工具
+
+- 交互式调整 $r$ 值
+- 实时显示稳定性/发散
+- 生成教学动画
+
+### 项目 2：PDE 求解器性能基准测试
+
+- 对比 NumPy、JAX、C++ 实现
+- 绘制性能曲线
+- 分析瓶颈
+
+### 项目 3：参数估计挑战赛
+
+- 从带噪声的观测数据估计 $\alpha$
+- 比较不同优化算法
+- 可视化优化过程
+
+### 项目 4：物理仿真应用
+
+- 建筑材料热性能分析
+- 食品加工中的温度控制
+- 电子器件散热设计
+
+
+## 致读者
+
+PDE 数值解是一个博大精深的领域，本讲义只是打开了一扇门。希望你能：
+
+- 保持好奇心，勇于尝试
+- 从简单问题开始，逐步深入
+- 理论与实践结合，知其然也知其所以然
+- 关注前沿，拥抱新工具
+
+::: callout-tip
+数值方法的本质是**用离散逼近连续**，用**计算代替推导**。理解这一点，你就掌握了核心。
+:::
+
+祝学习愉快！
+
+
+## 附录：常见问题解答
+
+**Q1：为什么不直接用 FEM（有限元）？**
+
+A：FEM 更灵活（处理复杂几何），但也更复杂。FDM 是基础，先学好再深入 FEM。
+
+**Q2：JAX 在 Windows 上安装困难怎么办？**
+
+A：优先使用 NumPy 版本，或考虑 Linux/WSL2。
+
+**Q3：如何选择 $\Delta t$ 和 $\Delta x$？**
+
+A：
+
+- 显式：先根据 CFL 定 $\Delta t$
+- 隐式：根据精度需求定 $\Delta t$
+- 空间：细化直到结果不再变化（网格收敛测试）
+
+**Q4：什么时候用显式，什么时候用隐式？**
+
+A：
+
+- 非刚性 + 需要细粒度 → 显式
+- 刚性 + 稳态计算 → 隐式（特别是 BE）
+- 高精度瞬态 → CN
+
+**Q5：2D 问题太慢，怎么办？**
+
+A：
+
+- 使用预条件器
+- 考虑多重网格方法
+- 使用 JAX 加速（GPU 版本可再快 10-100 倍）
+
+**致谢**
+
+感谢所有为科学计算开源社区做出贡献的开发者，特别是 NumPy、JAX、Matplotlib 的维护者。
+
+感谢学生们的反馈和建议，让这份讲义不断改进。
